@@ -8,6 +8,7 @@
 //! §5.4.7.
 
 use ff::PrimeField;
+use group::Group;
 
 use pasta_curves::pallas;
 use rand_core::CryptoRng;
@@ -29,6 +30,26 @@ pub const FETCH_LEN: usize = FETCH_UNSIGNED_LEN + 64;
 
 /// Bytes of randomness `T`: `(ℓ_H + 128) / 8` with `ℓ_H = 512`. Protocol spec §5.4.7.
 const T_LEN: usize = 80;
+
+/// Bytes of `T` always taken from the operating system's random generator,
+/// whatever RNG the caller passes. ZIP § Mailbox Servers (L322–324).
+const T_OS_LEN: usize = 32;
+const _: () = assert!(T_OS_LEN >= 32 && T_OS_LEN < T_LEN);
+
+/// The operating system's random generator failed, so no signature was made.
+///
+/// Spec: ZIP § Mailbox Servers (L322–324): `T` needs fresh randomness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OsRandomUnavailable;
+
+impl core::fmt::Display for OsRandomUnavailable {
+    /// Spec: none (diagnostics only).
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("operating system random generator unavailable")
+    }
+}
+
+impl std::error::Error for OsRandomUnavailable {}
 
 /// `H*(B) = ToScalar^Orchard(BLAKE2b-512("Zcash_RedPallasH", B))`.
 ///
@@ -60,14 +81,18 @@ fn sign_with_t(
     let nonce = Zeroizing::new(h_star(&[a_bytes.as_ref(), t, msg]));
     let r_bytes = point_bytes(&(g * *nonce));
     let c = h_star(&[&r_bytes, &point_bytes(p), msg]);
-    let s = Zeroizing::new(*nonce + c * a);
+    // c·a reveals a given c, so it is wiped like the nonce.
+    let ca = Zeroizing::new(c * a);
+    let s = Zeroizing::new(*nonce + *ca);
     let mut sig = [0u8; 64];
     sig[..32].copy_from_slice(&r_bytes);
     sig[32..].copy_from_slice(&s.to_repr());
     sig
 }
 
-/// `RedDSA.Sign` with generator `G`, sampling a fresh `T`.
+/// `RedDSA.Sign` with generator `G`, sampling a fresh `T`: the first 32 bytes
+/// always come from the operating system's random generator, the other 48
+/// from `rng`, so a weak or seeded `rng` cannot make `T` predictable.
 ///
 /// Spec: ZIP § Mailbox Servers (L320–324), protocol spec §5.4.7.
 fn sign<R: CryptoRng + ?Sized>(
@@ -76,15 +101,17 @@ fn sign<R: CryptoRng + ?Sized>(
     p: &pallas::Point,
     msg: &[u8],
     rng: &mut R,
-) -> [u8; 64] {
+) -> Result<[u8; 64], OsRandomUnavailable> {
     let mut t = Zeroizing::new([0u8; T_LEN]);
-    rng.fill_bytes(&mut *t);
-    sign_with_t(g, a, p, msg, &t)
+    getrandom::fill(&mut t[..T_OS_LEN]).map_err(|_| OsRandomUnavailable)?;
+    rng.fill_bytes(&mut t[T_OS_LEN..]);
+    Ok(sign_with_t(g, a, p, msg, &t))
 }
 
-/// `RedDSA.Validate` with generator `G`: rejects a non-canonical `R̄` or
-/// `S ≥ r_P`, and otherwise accepts iff `[S] G == R + [c] P` with
-/// `c = H*(R̄ || repr(P) || M)` (the Pallas cofactor is 1).
+/// `RedDSA.Validate` with generator `G`: rejects a non-canonical `R̄`,
+/// `S ≥ r_P`, and an identity `R`, `P` or `G`, and otherwise accepts iff
+/// `[S] G == R + [c] P` with `c = H*(R̄ || repr(P) || M)` (the Pallas
+/// cofactor is 1).
 ///
 /// Spec: ZIP § Mailbox Servers (L320–322), protocol spec §5.4.7.
 fn verify(g: &pallas::Point, p: &pallas::Point, msg: &[u8], sig: &[u8; 64]) -> bool {
@@ -98,6 +125,9 @@ fn verify(g: &pallas::Point, p: &pallas::Point, msg: &[u8], sig: &[u8; 64]) -> b
     let Some(s) = Option::<pallas::Scalar>::from(pallas::Scalar::from_repr(s_bytes)) else {
         return false;
     };
+    if bool::from(r.is_identity() | p.is_identity() | g.is_identity()) {
+        return false;
+    }
     let c = h_star(&[&r_bytes, &point_bytes(p), msg]);
     bool::from((g * s).ct_eq(&(r + p * c)))
 }
@@ -140,7 +170,8 @@ impl FetchRequest {
     }
 
     /// Builds and signs a Fetch for `key`'s mailbox, addressed to `server_id`.
-    /// Returns the full request bytes, ending in `sig`.
+    /// Returns the full request bytes, ending in `sig`. `T` takes 32 bytes from
+    /// the operating system's random generator in addition to `rng`.
     ///
     /// Spec: ZIP § Mailbox Servers (L312, L320–324).
     pub fn sign<R: CryptoRng + ?Sized>(
@@ -149,7 +180,7 @@ impl FetchRequest {
         time: u32,
         server_id: &[u8; 32],
         rng: &mut R,
-    ) -> [u8; FETCH_LEN] {
+    ) -> Result<[u8; FETCH_LEN], OsRandomUnavailable> {
         let req = FetchRequest {
             mailbox_id: key.id(),
             after,
@@ -161,11 +192,11 @@ impl FetchRequest {
             key.p(),
             &req.signed_message(server_id),
             rng,
-        );
+        )?;
         let mut out = [0u8; FETCH_LEN];
         out[..FETCH_UNSIGNED_LEN].copy_from_slice(&req.unsigned_bytes());
         out[FETCH_UNSIGNED_LEN..].copy_from_slice(&sig);
-        out
+        Ok(out)
     }
 
     /// Server side: parses and checks a Fetch addressed to `server_id` at server
@@ -239,7 +270,7 @@ mod tests {
     fn sign_verify() {
         let mut rng = rng();
         let (g, a, p) = keypair(&mut rng);
-        let sig = sign(&g, &a, &p, b"msg", &mut rng);
+        let sig = sign(&g, &a, &p, b"msg", &mut rng).unwrap();
         assert!(verify(&g, &p, b"msg", &sig));
         assert!(!verify(&g, &p, b"msh", &sig));
     }
@@ -251,12 +282,12 @@ mod tests {
         let mut rng = rng();
         let (g, a, p) = keypair(&mut rng);
         let (g2, a2, p2) = keypair(&mut rng);
-        let sig = sign(&g, &a, &p, b"msg", &mut rng);
+        let sig = sign(&g, &a, &p, b"msg", &mut rng).unwrap();
         assert!(!verify(&g, &p2, b"msg", &sig));
         assert!(!verify(&g2, &p, b"msg", &sig));
         assert!(!verify(&pallas::Point::generator(), &p, b"msg", &sig));
         // Signing with the wrong scalar for P.
-        let forged = sign(&g, &a2, &p, b"msg", &mut rng);
+        let forged = sign(&g, &a2, &p, b"msg", &mut rng).unwrap();
         assert!(!verify(&g, &p, b"msg", &forged));
     }
 
@@ -267,8 +298,8 @@ mod tests {
     fn nonce_is_fresh_and_hedged() {
         let mut rng = rng();
         let (g, a, p) = keypair(&mut rng);
-        let s1 = sign(&g, &a, &p, b"msg", &mut rng);
-        let s2 = sign(&g, &a, &p, b"msg", &mut rng);
+        let s1 = sign(&g, &a, &p, b"msg", &mut rng).unwrap();
+        let s2 = sign(&g, &a, &p, b"msg", &mut rng).unwrap();
         assert_ne!(s1[..32], s2[..32]);
         assert!(verify(&g, &p, b"msg", &s1) && verify(&g, &p, b"msg", &s2));
 
@@ -287,7 +318,7 @@ mod tests {
     fn non_canonical_rejected() {
         let mut rng = rng();
         let (g, a, p) = keypair(&mut rng);
-        let sig = sign(&g, &a, &p, b"msg", &mut rng);
+        let sig = sign(&g, &a, &p, b"msg", &mut rng).unwrap();
 
         let mut bad_r = sig;
         bad_r[..32].fill(0xff);
@@ -329,7 +360,7 @@ mod tests {
         let theirs: [u8; 64] = sk.sign(&mut rng, b"interop").into();
         assert!(verify(&g, &p, b"interop", &theirs));
 
-        let ours = sign(&g, &a, &p, b"interop", &mut rng);
+        let ours = sign(&g, &a, &p, b"interop", &mut rng).unwrap();
         assert!(vk
             .verify(b"interop", &reddsa::Signature::from(ours))
             .is_ok());
@@ -340,7 +371,7 @@ mod tests {
     #[test]
     fn fetch_round_trip() {
         let key = mailbox();
-        let req = FetchRequest::sign(&key, 42, NOW, &SERVER_A, &mut rng());
+        let req = FetchRequest::sign(&key, 42, NOW, &SERVER_A, &mut rng()).unwrap();
         assert_eq!(req.len(), FETCH_LEN);
         let got = FetchRequest::verify(&SERVER_A, &req, NOW).unwrap();
         assert_eq!(
@@ -357,14 +388,14 @@ mod tests {
     /// `server_id` fails at another.
     #[test]
     fn fetch_bound_to_server() {
-        let req = FetchRequest::sign(&mailbox(), 0, NOW, &SERVER_A, &mut rng());
+        let req = FetchRequest::sign(&mailbox(), 0, NOW, &SERVER_A, &mut rng()).unwrap();
         assert!(FetchRequest::verify(&SERVER_B, &req, NOW).is_none());
     }
 
     /// Spec: ZIP § Mailbox Servers (L326–328): `time` more than an hour off is dropped.
     #[test]
     fn fetch_time_window() {
-        let req = FetchRequest::sign(&mailbox(), 0, NOW, &SERVER_A, &mut rng());
+        let req = FetchRequest::sign(&mailbox(), 0, NOW, &SERVER_A, &mut rng()).unwrap();
         for now in [NOW - 1, NOW, NOW + 1] {
             assert!(
                 FetchRequest::verify(&SERVER_A, &req, now).is_some(),
@@ -384,7 +415,7 @@ mod tests {
     /// signed byte.
     #[test]
     fn fetch_malformed_dropped() {
-        let req = FetchRequest::sign(&mailbox(), 9, NOW, &SERVER_A, &mut rng());
+        let req = FetchRequest::sign(&mailbox(), 9, NOW, &SERVER_A, &mut rng()).unwrap();
         assert!(FetchRequest::verify(&SERVER_A, &req[..FETCH_LEN - 1], NOW).is_none());
         let mut longer = req.to_vec();
         longer.push(0);
@@ -418,10 +449,69 @@ mod tests {
             0x0a0b_0c0d,
             &SERVER_A,
             &mut rng(),
-        );
+        )
+        .unwrap();
         assert_eq!(req[0], 2);
         assert_eq!(&req[1..65], key.id().as_bytes());
         assert_eq!(&req[65..73], &[8, 7, 6, 5, 4, 3, 2, 1]);
         assert_eq!(&req[73..77], &[0x0d, 0x0c, 0x0b, 0x0a]);
+    }
+
+    /// Spec: ZIP § Mailbox Servers (L322–324): `T` mixes in operating-system
+    /// randomness, so two signers with identically seeded RNGs still get
+    /// different `R`.
+    #[test]
+    fn t_uses_os_randomness() {
+        let (g, a, p) = keypair(&mut rng());
+        let s1 = sign(&g, &a, &p, b"msg", &mut StdRng::seed_from_u64(9)).unwrap();
+        let s2 = sign(&g, &a, &p, b"msg", &mut StdRng::seed_from_u64(9)).unwrap();
+        assert_ne!(s1[..32], s2[..32]);
+        assert!(verify(&g, &p, b"msg", &s1) && verify(&g, &p, b"msg", &s2));
+    }
+
+    /// Spec: protocol spec §5.4.7, ZIP § Mailboxes (L263–264): an identity `R`,
+    /// `P` or `G` is rejected, even for signatures that satisfy the equation.
+    #[test]
+    fn identity_points_rejected() {
+        let (g, a, p) = keypair(&mut rng());
+        let id = pallas::Point::identity();
+
+        // R = O with S = c·a satisfies [S]G = R + [c]P.
+        let r_bytes = [0u8; 32];
+        let c = h_star(&[&r_bytes, &point_bytes(&p), b"msg"]);
+        let mut sig = [0u8; 64];
+        sig[32..].copy_from_slice(&(c * a).to_repr());
+        assert_eq!(g * (c * a), id + p * c, "equation holds");
+        assert!(!verify(&g, &p, b"msg", &sig));
+
+        // P = O (a = 0) satisfies the equation for any honest-looking R.
+        let zero = pallas::Scalar::ZERO;
+        let sig = sign_with_t(&g, &zero, &id, b"msg", &[1u8; T_LEN]);
+        assert!(!verify(&g, &id, b"msg", &sig));
+
+        // G = O makes every point equal; reject it too.
+        let sig = sign_with_t(&id, &a, &id, b"msg", &[2u8; T_LEN]);
+        assert!(!verify(&id, &id, b"msg", &sig));
+    }
+
+    /// Spec: protocol spec §5.4.7: the challenge is exactly
+    /// BLAKE2b-512("Zcash_RedPallasH", R̄ || repr(P) || M) reduced mod r_P,
+    /// recomputed here independently of `h_star`.
+    #[test]
+    fn challenge_is_r_then_p_then_msg() {
+        let (g, a, p) = keypair(&mut rng());
+        let sig = sign(&g, &a, &p, b"order", &mut rng()).unwrap();
+        let mut input = sig[..32].to_vec();
+        input.extend_from_slice(&point_bytes(&p));
+        input.extend_from_slice(b"order");
+        let h = blake2b_simd::Params::new()
+            .hash_length(64)
+            .personal(b"Zcash_RedPallasH")
+            .hash(&input);
+        let c = to_scalar(h.as_bytes().try_into().unwrap());
+        let r =
+            Option::<pallas::Point>::from(point_from_bytes(sig[..32].try_into().unwrap())).unwrap();
+        let s = pallas::Scalar::from_repr(sig[32..].try_into().unwrap()).unwrap();
+        assert_eq!(g * s, r + p * c);
     }
 }

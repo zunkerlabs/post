@@ -204,6 +204,7 @@ dependencies = [
  "cipher",
  "cpufeatures",
  "rand_core",
+ "zeroize",
 ]
 
 [[package]]
@@ -216,6 +217,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -762,6 +764,7 @@ checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
 dependencies = [
  "cpufeatures",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -1369,11 +1372,14 @@ name = "zunker-core"
 version = "0.1.0"
 dependencies = [
  "blake2b_simd",
+ "chacha20",
  "chacha20poly1305",
  "ff",
+ "getrandom",
  "group",
  "orchard",
  "pasta_curves",
+ "poly1305",
  "rand",
  "rand_core",
  "reddsa",

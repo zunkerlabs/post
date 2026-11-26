@@ -120,6 +120,12 @@ impl Conversation {
         }
     }
 
+    /// Takes ownership of an already-wrapped `κ`, so it is never copied out
+    /// of its zeroizing wrapper. Spec: ZIP § Envelopes (L214–231).
+    fn from_secret(kappa: Zeroizing<[u8; 32]>, responder: Receiver) -> Self {
+        Conversation { kappa, responder }
+    }
+
     /// `κ`, for storage. Treat it as a secret: it reads and writes the
     /// Conversation. Spec: ZIP § Envelopes (L214), § Privacy Implications (L97–104).
     pub fn kappa(&self) -> &[u8; 32] {
@@ -219,7 +225,7 @@ pub fn seal_first<R: CryptoRng + ?Sized>(
     let shared = Zeroizing::new(to.pk_d() * *esk);
     let kappa = first_kappa(&shared, &ek);
     let envelope = seal_with(&kappa, Direction::Initiator, &ek, &seed, msg)?;
-    Ok((envelope, Conversation::from_parts(*kappa, *to)))
+    Ok((envelope, Conversation::from_secret(kappa, *to)))
 }
 
 /// Seals an Envelope in `conv`, sent by `from`.
@@ -249,7 +255,7 @@ pub fn open_first(
 ) -> Result<(Message, Conversation), Dropped> {
     let checks = check_first(at, envelope, now, &*seen).ok_or(Dropped)?;
     let (msg, kappa) = checks.accept(seen)?;
-    Ok((msg, Conversation::from_parts(*kappa, *at.receiver())))
+    Ok((msg, Conversation::from_secret(kappa, *at.receiver())))
 }
 
 /// Opens an Envelope in `conv` that `from` sent, fetched from the matching
@@ -405,6 +411,8 @@ struct Checks {
     kappa: Zeroizing<[u8; 32]>,
     fields: Fields,
     plaintext: Zeroizing<Vec<u8>>,
+    /// `version` is known.
+    version_ok: Choice,
     /// `ephemeralKey` is a valid point encoding (first Envelopes only).
     point_ok: Choice,
     aead_ok: Choice,
@@ -424,7 +432,8 @@ impl Checks {
         self,
         seen: &mut impl ReplayGuard,
     ) -> Result<(Message, Zeroizing<[u8; 32]>), Dropped> {
-        let ok = self.point_ok
+        let ok = self.version_ok
+            & self.point_ok
             & self.aead_ok
             & self.parse_ok
             & self.padding_ok
@@ -448,8 +457,10 @@ impl Checks {
 }
 
 /// Evaluates the drop rules for a first Envelope to `at`. Returns `None` only
-/// for an unknown `version` or length, which are visible to anyone and chosen
-/// by the sender, so rejecting them early reveals nothing.
+/// for an unknown length: without a known `N` there is nothing to decrypt, and
+/// the length is visible to anyone and chosen by the sender, so rejecting it
+/// early reveals nothing. Every other rule, including `version`, is evaluated
+/// in full and combined in [`Checks::accept`].
 ///
 /// Spec: ZIP § Envelopes (L225–246); `[esk] pk_d = [ivk] epk` (L229–231).
 fn check_first(
@@ -477,7 +488,9 @@ fn check_first(
 }
 
 /// Evaluates the drop rules for an Envelope under `κ` from `from`, checking
-/// `ephemeralKey` against the responder's `g_d`.
+/// `ephemeralKey` against the responder's `g_d`. Decryption, parsing and every
+/// check run whether or not earlier checks failed; only an unknown length
+/// returns early (see [`check_first`]).
 ///
 /// Spec: ZIP § Envelopes (L221–223, L233–246).
 fn check(
@@ -491,12 +504,13 @@ fn check(
 ) -> Option<Checks> {
     let ek = framed_ephemeral_key(envelope)?;
     let n = size_class_of_envelope(envelope.len())?;
+    let version_ok = envelope[0].ct_eq(&VERSION);
 
     let key = envelope_key(&kappa, from, &ek);
     let mut plaintext = Zeroizing::new(envelope[PREFIX_LEN..PREFIX_LEN + n].to_vec());
     let mut tag = [0u8; TAG_LEN];
     tag.copy_from_slice(&envelope[PREFIX_LEN + n..]);
-    let aead_ok = Choice::from(u8::from(sym_decrypt(&key, &mut plaintext, &tag)));
+    let aead_ok = sym_decrypt(&key, &mut plaintext, &tag);
 
     let (fields, parse_ok, padding_ok) = parse_plaintext(&plaintext);
 
@@ -510,6 +524,7 @@ fn check(
         kappa,
         fields,
         plaintext,
+        version_ok,
         point_ok,
         aead_ok,
         parse_ok,
@@ -520,15 +535,12 @@ fn check(
     })
 }
 
-/// Returns `ephemeralKey` if `version` is known and the length is one of the
-/// three Envelope lengths.
+/// Returns `ephemeralKey` if the length is one of the three Envelope lengths.
+/// `version` is checked with the other rules, not here.
 ///
 /// Spec: ZIP § Envelopes (L194–198, L239).
 fn framed_ephemeral_key(envelope: &[u8]) -> Option<[u8; 32]> {
     size_class_of_envelope(envelope.len())?;
-    if envelope[0] != VERSION {
-        return None;
-    }
     let mut ek = [0u8; 32];
     ek.copy_from_slice(&envelope[1..PREFIX_LEN]);
     Some(ek)
@@ -557,8 +569,6 @@ struct Fields {
 /// Spec: ZIP § Envelopes (L200–212, L240), § Notation (L184).
 fn parse_plaintext(pt: &[u8]) -> (Fields, Choice, Choice) {
     let n = pt.len();
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&pt[..32]);
     let payload_type = u16::from_le_bytes([pt[32], pt[33]]);
     let flags = pt[34];
     let expiry_time = u32::from_le_bytes([pt[35], pt[36], pt[37], pt[38]]);
@@ -586,8 +596,8 @@ fn parse_plaintext(pt: &[u8]) -> (Fields, Choice, Choice) {
     }
     let padding_ok = nonzero.ct_eq(&0);
 
-    let fields = Fields {
-        seed,
+    let mut fields = Fields {
+        seed: [0u8; 32],
         payload_type,
         flags,
         expiry_time,
@@ -596,6 +606,8 @@ fn parse_plaintext(pt: &[u8]) -> (Fields, Choice, Choice) {
         payload_start,
         payload_end,
     };
+    // Copied straight into the zeroize-on-drop struct, never via a local.
+    fields.seed.copy_from_slice(&pt[..32]);
     (fields, parse_ok, padding_ok)
 }
 
@@ -744,6 +756,10 @@ mod tests {
 
         let mut bad_version = env.clone();
         bad_version[0] = 2;
+        // Evaluated with the other rules, not by an early return.
+        let checks = check_first(&me, &bad_version, NOW, &HashSet::new()).unwrap();
+        assert!(!bool::from(checks.version_ok));
+        assert!(bool::from(checks.aead_ok & checks.ek_ok & checks.parse_ok));
         assert!(dropped(open_first(
             &me,
             &bad_version,
