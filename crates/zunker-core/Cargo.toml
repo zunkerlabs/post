@@ -16,3 +16,6 @@ group = "0.14"
 pasta_curves = { version = "0.6", features = ["alloc", "zeroize"] }
 subtle = "2.6"
 zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+orchard = { version = "0.16", default-features = false, features = ["std"] }
