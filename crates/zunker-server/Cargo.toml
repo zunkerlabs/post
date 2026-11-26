@@ -1,0 +1,24 @@
+[package]
+name = "zunker-server"
+version = "0.1.0"
+description = "Mailbox Server for Zcash Wallet-to-Wallet Messaging (ZIP draft #1435)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex = "0.4.3"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync"] }
+toml = "1.2.3"
+zunker-core = { version = "0.1.0", path = "../zunker-core" }
+
+[dev-dependencies]
+ff = "0.14"
+group = "0.14"
+pasta_curves = "0.6"
+rand = "0.10"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync", "test-util"] }
