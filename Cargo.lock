@@ -761,6 +761,7 @@ dependencies = [
  "pasta_curves",
  "rand",
  "rand_core",
+ "reddsa",
  "subtle",
  "zeroize",
 ]

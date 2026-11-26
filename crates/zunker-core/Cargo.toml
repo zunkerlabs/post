@@ -21,3 +21,4 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 [dev-dependencies]
 orchard = { version = "0.16", default-features = false, features = ["std"] }
 rand = "0.10"
+reddsa = "0.6"
