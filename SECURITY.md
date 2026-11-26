@@ -31,6 +31,8 @@ remain in freed stack memory:
 - **Envelopes:** `κ` (the output of the first-Envelope derivation, and an input
   to `K`), `K`, `seed` (the input to `esk`), and `PointBytes([esk] pk_d)`.
 - **Pairwise Mailboxes:** `m = κ || [δ] || I2LEOSP_32(e)`.
+- **Fetch signatures:** the signing key `a` and the random input `T`, both inputs
+  to the nonce `H*(a || T || M)`, and the nonce derived from them.
 
 The `orchard` and `reddsa` crates have the same property, since they use
 `blake2b_simd` too. We accept it while Zunker Post is testnet only, and will
