@@ -14,8 +14,10 @@ chacha20poly1305 = { version = "0.11", default-features = false }
 ff = "0.14"
 group = "0.14"
 pasta_curves = { version = "0.6", features = ["alloc", "zeroize"] }
+rand_core = "0.10"
 subtle = "2.6"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 orchard = { version = "0.16", default-features = false, features = ["std"] }
+rand = "0.10"

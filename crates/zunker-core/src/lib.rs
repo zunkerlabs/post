@@ -8,4 +8,5 @@
 #![deny(missing_docs)]
 
 pub mod encoding;
+pub mod envelope;
 pub mod receiver;
