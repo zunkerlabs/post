@@ -1,0 +1,18 @@
+[package]
+name = "zunker-core"
+version = "0.1.0"
+description = "Core cryptography for Zcash Wallet-to-Wallet Messaging (ZIP draft #1435)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+blake2b_simd = "1"
+chacha20poly1305 = { version = "0.11", default-features = false }
+ff = "0.14"
+group = "0.14"
+pasta_curves = { version = "0.6", features = ["alloc", "zeroize"] }
+subtle = "2.6"
+zeroize = { version = "1", features = ["zeroize_derive"] }
