@@ -132,7 +132,7 @@ impl Harness {
     /// A signed Fetch at the current time. Spec: § Mailbox Servers (L312, L320–322).
     fn fetch_request(&mut self, key: &MailboxKey, after: u64) -> [u8; 141] {
         let time = self.hours();
-        FetchRequest::sign(key, after, time, &SERVER_ID, &mut self.rng)
+        FetchRequest::sign(key, after, time, &SERVER_ID, &mut self.rng).unwrap()
     }
 
     /// Fetches; `None` means the server dropped the request.
@@ -280,7 +280,7 @@ async fn time_window() {
         (now + 1, true),
         (now + 2, false),
     ] {
-        let req = FetchRequest::sign(&k, 0, time, &SERVER_ID, &mut h.rng);
+        let req = FetchRequest::sign(&k, 0, time, &SERVER_ID, &mut h.rng).unwrap();
         assert_eq!(
             decode(&send(h.addr, &req).await).is_some(),
             ok,
@@ -305,10 +305,10 @@ async fn bad_signature_dropped() {
         bad[i] ^= 1;
         assert!(send(h.addr, &bad).await.is_empty(), "byte {i}");
     }
-    let other_server = FetchRequest::sign(&k, 0, h.hours(), &[0x11; 32], &mut h.rng);
+    let other_server = FetchRequest::sign(&k, 0, h.hours(), &[0x11; 32], &mut h.rng).unwrap();
     assert!(send(h.addr, &other_server).await.is_empty());
     // Another mailbox's key cannot fetch this one: swap in k's ID.
-    let mut wrong_key = FetchRequest::sign(&key(2), 0, h.hours(), &SERVER_ID, &mut h.rng);
+    let mut wrong_key = FetchRequest::sign(&key(2), 0, h.hours(), &SERVER_ID, &mut h.rng).unwrap();
     wrong_key[1..65].copy_from_slice(k.id().as_bytes());
     assert!(send(h.addr, &wrong_key).await.is_empty());
     assert_eq!(seqs(&decode(&send(h.addr, &good).await).unwrap()), [1]);
