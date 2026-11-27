@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::metrics::{Counter, Metrics};
 use crate::store::{DepositLimits, DepositOutcome, Store};
 use crate::verify::FetchVerifier;
-use crate::wire::{
+use zunker_wire::{
     parse_request, push_fetch_item, read_frame, write_frame, Request, MAX_REQUEST_LEN,
 };
 

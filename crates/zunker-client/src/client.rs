@@ -11,7 +11,7 @@ use zunker_core::mailbox::{
     contact_mailbox_id, contact_mailbox_key, epoch, pairwise_mailbox_key, MailboxKey,
 };
 use zunker_core::sig::FetchRequest;
-use zunker_server::wire::{decode_fetch_response, encode_deposit};
+use zunker_wire::{decode_fetch_response, encode_deposit};
 
 use crate::address::{orchard_receiver, Account, AddressError};
 use crate::schedule::{MailboxRef, Schedule};

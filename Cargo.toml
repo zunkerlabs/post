@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zunker-cli", "crates/zunker-client", "crates/zunker-core", "crates/zunker-server"]
+members = ["crates/zunker-cli", "crates/zunker-client", "crates/zunker-core", "crates/zunker-server", "crates/zunker-wire"]
 
 [workspace.package]
 edition = "2021"

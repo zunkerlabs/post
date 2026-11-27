@@ -17,8 +17,8 @@ use zunker_core::envelope::{Conversation, Direction};
 use zunker_core::mailbox::{pairwise_mailbox_key, MailboxKey};
 use zunker_core::receiver::Receiver;
 use zunker_core::sig::FetchRequest;
-use zunker_server::wire::{decode_fetch_response, encode_deposit, FetchedEnvelope};
 use zunker_server::{Config, CoreVerifier, ManualClock, Server, SqliteStore};
+use zunker_wire::{decode_fetch_response, encode_deposit, FetchedEnvelope};
 
 const SERVER_ID: [u8; 32] = [0x5e; 32];
 const NOW_HOURS: u64 = 500_000;
