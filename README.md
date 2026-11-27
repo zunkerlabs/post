@@ -25,6 +25,16 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+`cargo test` includes an integration test with two in-process Mailbox
+Servers (`crates/zunker-client/tests/two_servers.rs`). The end-to-end test
+over the real Tor network is ignored by default, because it needs a server
+behind an onion service, such as the Docker setup below:
+
+```sh
+ZUNKER_TOR_ONION=<56 chars>.onion:7878 ZUNKER_TOR_SERVER_ID=<64 hex> \
+  cargo test -p zunker-client --test tor -- --ignored --nocapture
+```
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the rules code in this repository follows.
 
 ## Running a Mailbox Server

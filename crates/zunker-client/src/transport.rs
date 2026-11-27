@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use arti_client::config::{BoolOrAuto, TorClientConfigBuilder};
 use arti_client::{IsolationToken, StreamPrefs, TorClient};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tor_rtcompat::PreferredRuntime;
 use zunker_server::wire::{read_frame, write_frame};
@@ -304,8 +304,9 @@ fn fresh_socks_credentials() -> Result<(String, String), TransportError> {
 }
 
 /// Writes the request frame, half-closes, and reads the response frame if one
-/// is expected. A connection closed without a response means the server
-/// dropped the request. Spec: Appendix A, Tor (L497–498); § Mailbox Servers (L326–328).
+/// is expected, or else waits for the server to close. A connection closed
+/// without a response means the server dropped the request (or, for a
+/// Deposit, handled it). Spec: Appendix A, Tor (L497–498); § Mailbox Servers (L326–328).
 async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     request: &[u8],
@@ -314,7 +315,18 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     write_frame(&mut stream, request).await?;
     stream.shutdown().await?;
     if !expect_response {
-        return Ok(None);
+        // The server closes a Deposit's connection, without a response, once
+        // it has handled it. Waiting for that close means a returned Deposit
+        // has reached the server; stored and dropped look the same.
+        let mut sink = [0u8; 64];
+        loop {
+            match stream.read(&mut sink).await {
+                Ok(0) => return Ok(None),
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
     match read_frame(&mut stream, MAX_RESPONSE_LEN).await {
         Ok(Some(frame)) => Ok(Some(frame)),
