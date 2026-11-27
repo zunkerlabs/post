@@ -143,9 +143,18 @@ impl Harness {
     }
 }
 
-/// `seq`s of fetched Envelopes. Spec: § Mailbox Servers (L312).
-fn seqs(items: &[FetchedEnvelope]) -> Vec<u64> {
-    items.iter().map(|i| i.seq).collect()
+/// The fill byte of each fetched Envelope (see [`envelope`]), to tell them
+/// apart. `seq`s come from a clock-based global counter, so tests compare
+/// those by order rather than by value. Spec: § Mailbox Servers (L312).
+fn tags(items: &[FetchedEnvelope]) -> Vec<u8> {
+    items.iter().map(|i| i.envelope[1]).collect()
+}
+
+/// The `seq` of the only Envelope in a mailbox. Spec: § Mailbox Servers (L312).
+async fn only_seq(h: &mut Harness, key: &MailboxKey) -> u64 {
+    let items = h.fetch(key, 0).await.unwrap();
+    assert_eq!(items.len(), 1);
+    items[0].seq
 }
 
 /// Spec: § Mailbox Servers (L311–312, L314–316): Deposit then Fetch returns
@@ -159,7 +168,8 @@ async fn deposit_then_fetch_round_trip() {
     h.deposit(&k, &small).await;
     h.deposit(&k, &medium).await;
     let items = h.fetch(&k, 0).await.unwrap();
-    assert_eq!(seqs(&items), [1, 2]);
+    assert_eq!(tags(&items), [0xaa, 0xbb]);
+    assert!(items[0].seq != 0 && items[0].seq < items[1].seq);
     assert_eq!(items[0].envelope, small);
     assert_eq!(items[1].envelope, medium);
     let m = h.server.metrics().snapshot();
@@ -169,8 +179,9 @@ async fn deposit_then_fetch_round_trip() {
     );
 }
 
-/// Spec: § Mailbox Servers (L314–315): `seq` is per mailbox, nonzero, strictly
-/// increasing, and never reused after deletion.
+/// Spec: § Mailbox Servers (L314–315): `seq` comes from one counter for every
+/// mailbox, starts at the deposit time shifted left 20 bits, increases
+/// strictly, and is never reused after deletion.
 #[tokio::test]
 async fn seq_monotonic_and_never_reused() {
     let mut h = start(|c| {
@@ -183,13 +194,17 @@ async fn seq_monotonic_and_never_reused() {
         h.deposit(&a, &envelope(2048, i)).await;
         h.deposit(&b, &envelope(2048, i)).await;
     }
-    assert_eq!(seqs(&h.fetch(&a, 0).await.unwrap()), [1, 2, 3]);
-    assert_eq!(seqs(&h.fetch(&b, 0).await.unwrap()), [1, 2, 3]);
+    let fa = h.fetch(&a, 0).await.unwrap();
+    let fb = h.fetch(&b, 0).await.unwrap();
+    assert_eq!((tags(&fa), tags(&fb)), (vec![0, 1, 2], vec![0, 1, 2]));
+    assert_eq!(fa[0].seq, h.clock_secs() << 20);
+    // Interleaved deposits get interleaved `seq`s.
+    assert!(fa[0].seq < fb[0].seq && fb[0].seq < fa[1].seq && fa[2].seq < fb[2].seq);
     // Acknowledge (and delete) a's Envelopes, then deposit again.
-    assert!(h.fetch(&a, 3).await.unwrap().is_empty());
+    assert!(h.fetch(&a, fa[2].seq).await.unwrap().is_empty());
     assert!(h.fetch(&a, 0).await.unwrap().is_empty());
     h.deposit(&a, &envelope(2048, 9)).await;
-    assert_eq!(seqs(&h.fetch(&a, 0).await.unwrap()), [4]);
+    assert!(only_seq(&mut h, &a).await > fb[2].seq);
 }
 
 /// Spec: § Mailbox Servers (L315–317): `after` is a cursor, the byte budget
@@ -204,21 +219,21 @@ async fn cursor_and_byte_budget() {
     }
     // 262205 / (12 + 32817) = 7 triples per response.
     let first = h.fetch(&k, 0).await.unwrap();
-    assert_eq!(seqs(&first), (1..=7).collect::<Vec<_>>());
-    let rest = h.fetch(&k, 7).await.unwrap();
-    assert_eq!(seqs(&rest), [8, 9, 10]);
+    assert_eq!(tags(&first), (0..7).collect::<Vec<_>>());
+    let rest = h.fetch(&k, first[6].seq).await.unwrap();
+    assert_eq!(tags(&rest), [7, 8, 9]);
     assert_eq!(rest[2].envelope, envelope(32768, 9));
-    assert!(h.fetch(&k, 10).await.unwrap().is_empty());
+    assert!(h.fetch(&k, rest[2].seq).await.unwrap().is_empty());
     assert!(h.fetch(&k, u64::MAX).await.unwrap().is_empty());
     // Deletion is off by default: a second device still sees everything.
     assert_eq!(
-        seqs(&h.fetch(&k, 0).await.unwrap()),
-        (1..=7).collect::<Vec<_>>()
+        tags(&h.fetch(&k, 0).await.unwrap()),
+        (0..7).collect::<Vec<_>>()
     );
     // A largest-size Envelope always fits the minimum budget.
     let big = key(2);
     h.deposit(&big, &envelope(262_144, 1)).await;
-    assert_eq!(seqs(&h.fetch(&big, 0).await.unwrap()), [1]);
+    assert_eq!(tags(&h.fetch(&big, 0).await.unwrap()), [1]);
 }
 
 /// Spec: § Mailbox Servers (L326–328): malformed requests are dropped without
@@ -311,7 +326,7 @@ async fn bad_signature_dropped() {
     let mut wrong_key = FetchRequest::sign(&key(2), 0, h.hours(), &SERVER_ID, &mut h.rng).unwrap();
     wrong_key[1..65].copy_from_slice(k.id().as_bytes());
     assert!(send(h.addr, &wrong_key).await.is_empty());
-    assert_eq!(seqs(&decode(&send(h.addr, &good).await).unwrap()), [1]);
+    assert_eq!(tags(&decode(&send(h.addr, &good).await).unwrap()), [1]);
 }
 
 /// Spec: § Mailbox Servers (L329–330): an unknown mailbox and an emptied one
@@ -326,7 +341,8 @@ async fn empty_equals_unknown() {
     let used = key(1);
     let never = key(2);
     h.deposit(&used, &envelope(2048, 1)).await;
-    let _ = h.fetch(&used, 1).await.unwrap(); // deletes seq 1
+    let seq = only_seq(&mut h, &used).await;
+    let _ = h.fetch(&used, seq).await.unwrap(); // deletes it
     let req_used = h.fetch_request(&used, 0);
     let req_never = h.fetch_request(&never, 0);
     let a = send(h.addr, &req_used).await;
@@ -337,8 +353,9 @@ async fn empty_equals_unknown() {
     // With deletion off, a cursor past the end looks the same too.
     let mut h = start(|_| {}).await;
     h.deposit(&used, &envelope(2048, 1)).await;
-    let past = h.fetch_request(&used, 1);
-    let unknown = h.fetch_request(&never, 1);
+    let seq = only_seq(&mut h, &used).await;
+    let past = h.fetch_request(&used, seq);
+    let unknown = h.fetch_request(&never, seq);
     assert_eq!(send(h.addr, &past).await, send(h.addr, &unknown).await);
 }
 
@@ -355,27 +372,29 @@ async fn retention() {
     h.deposit(&k, &envelope(2048, 2)).await;
     h.clock.advance(3600 + 1);
     h.server.purge_expired().await;
-    assert_eq!(seqs(&h.fetch(&k, 0).await.unwrap()), [2]);
+    assert_eq!(tags(&h.fetch(&k, 0).await.unwrap()), [2]);
     assert_eq!(h.server.metrics().snapshot().envelopes_expired, 1);
 
     // Default: acknowledging never deletes.
     let mut h = start(|_| {}).await;
     h.deposit(&k, &envelope(2048, 1)).await;
+    let seq = only_seq(&mut h, &k).await;
     h.clock.advance(30 * 24 * 3600);
-    let _ = h.fetch(&k, 1).await.unwrap();
-    assert_eq!(seqs(&h.fetch(&k, 0).await.unwrap()), [1]);
+    let _ = h.fetch(&k, seq).await.unwrap();
+    assert_eq!(tags(&h.fetch(&k, 0).await.unwrap()), [1]);
 
     // Opt-in deletion respects the 7-day default minimum age.
     let mut h = start(|c| c.retention.delete_on_fetch = true).await;
     h.deposit(&k, &envelope(2048, 1)).await;
-    let _ = h.fetch(&k, 1).await.unwrap();
+    let seq = only_seq(&mut h, &k).await;
+    let _ = h.fetch(&k, seq).await.unwrap();
     assert_eq!(
-        seqs(&h.fetch(&k, 0).await.unwrap()),
+        tags(&h.fetch(&k, 0).await.unwrap()),
         [1],
         "too young to delete"
     );
     h.clock.advance(7 * 24 * 3600);
-    let _ = h.fetch(&k, 1).await.unwrap();
+    let _ = h.fetch(&k, seq).await.unwrap();
     assert!(h.fetch(&k, 0).await.unwrap().is_empty());
     assert_eq!(h.server.metrics().snapshot().envelopes_deleted, 1);
 }
@@ -394,15 +413,15 @@ async fn quota_and_capacity() {
     for i in 0..3 {
         h.deposit(&k, &envelope(2048, i)).await;
     }
-    assert_eq!(seqs(&h.fetch(&k, 0).await.unwrap()), [1, 2]);
+    assert_eq!(tags(&h.fetch(&k, 0).await.unwrap()), [0, 1]);
     // Another mailbox is unaffected.
     h.deposit(&key(2), &envelope(2048, 0)).await;
-    assert_eq!(seqs(&h.fetch(&key(2), 0).await.unwrap()), [1]);
+    assert_eq!(tags(&h.fetch(&key(2), 0).await.unwrap()), [0]);
     // Next window: one more fits, then the mailbox is full.
     h.clock.advance(3600);
     h.deposit(&k, &envelope(2048, 7)).await;
     h.deposit(&k, &envelope(2048, 8)).await;
-    assert_eq!(seqs(&h.fetch(&k, 0).await.unwrap()), [1, 2, 3]);
+    assert_eq!(tags(&h.fetch(&k, 0).await.unwrap()), [0, 1, 7]);
     assert_eq!(h.server.metrics().snapshot().deposits_dropped, 2);
 }
 
