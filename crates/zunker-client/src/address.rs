@@ -129,6 +129,46 @@ pub fn payment_request(uri: &str, now_hours: u32) -> Result<Message, AddressErro
     })
 }
 
+/// A Payment request payload whose single payment carries `text` as its
+/// ZIP 321 `message`, so a note travels with the request in one Envelope.
+/// The URI is re-encoded by the `zip321` crate, which percent-encodes the
+/// message. Rejects requests with several payments (which one would the
+/// note belong to?) and ones that already have a message.
+///
+/// Spec: § Payloads (L253); ZIP 321 `message` parameter.
+pub fn payment_request_with_message(
+    uri: &str,
+    text: &str,
+    now_hours: u32,
+) -> Result<Message, AddressError> {
+    let bad = |why: &str| AddressError::BadPaymentRequest(why.to_owned());
+    let req = zip321::TransactionRequest::from_uri(uri.trim())
+        .map_err(|e| AddressError::BadPaymentRequest(e.to_string()))?;
+    let payments = req.payments();
+    if payments.len() != 1 {
+        return Err(bad(
+            "a text can only be attached to a request with exactly one payment",
+        ));
+    }
+    let p = payments.values().next().expect("one payment");
+    if p.message().is_some() {
+        return Err(bad("the request already has a message"));
+    }
+    let with_text = zip321::Payment::new(
+        p.recipient_address().clone(),
+        p.amount(),
+        p.memo().cloned(),
+        p.label().cloned(),
+        Some(text.to_owned()),
+        p.other_params().to_vec(),
+    )
+    .map_err(|e| AddressError::BadPaymentRequest(e.to_string()))?;
+    let uri = zip321::TransactionRequest::new(vec![with_text])
+        .map_err(|e| AddressError::BadPaymentRequest(e.to_string()))?
+        .to_uri();
+    payment_request(&uri, now_hours)
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use orchard::keys::{FullViewingKey, Scope, SpendingKey};
@@ -184,5 +224,40 @@ mod tests {
         assert_eq!(m.expiry_time, 100 + DEFAULT_EXPIRY_HOURS);
         assert!(payment_request("https://example.com", 100).is_err());
         assert!(payment_request("zcash:?amount=1", 100).is_err());
+    }
+
+    /// The text becomes the payment's `message`, percent-encoded, and parses
+    /// back unchanged; everything else in the request is kept.
+    /// Spec: § Payloads (L253); ZIP 321.
+    #[test]
+    fn text_goes_into_message() {
+        let (_, ua) = account(1);
+        let note = "Zunker Post demo & co: 100% ?=#";
+        let uri = format!("zcash:{ua}?amount=0.1&label=Shop");
+        let m = payment_request_with_message(&uri, note, 7).unwrap();
+        assert_eq!(m.payload_type, payload_type::PAYMENT_REQUEST);
+        let sent = std::str::from_utf8(&m.payload).unwrap();
+        assert!(
+            !sent.contains(' ') && !sent.contains('#'),
+            "percent-encoded: {sent}"
+        );
+        assert_eq!(
+            sent.matches('&').count(),
+            2,
+            "only the parameter separators: {sent}"
+        );
+        let back = zip321::TransactionRequest::from_uri(sent).unwrap();
+        let p = &back.payments()[&0];
+        assert_eq!(p.message().unwrap(), note);
+        assert_eq!(p.label().unwrap(), "Shop");
+        assert_eq!(p.amount().unwrap().into_u64(), 10_000_000);
+        assert_eq!(p.recipient_address().encode(), ua);
+
+        // Already has a message, or several payments: refused.
+        let has = format!("zcash:{ua}?amount=0.1&message=hi");
+        assert!(payment_request_with_message(&has, note, 7).is_err());
+        let two = format!("zcash:?address={ua}&amount=0.1&address.1={ua}&amount.1=0.2");
+        assert!(payment_request_with_message(&two, note, 7).is_err());
+        assert!(payment_request_with_message("https://x", note, 7).is_err());
     }
 }

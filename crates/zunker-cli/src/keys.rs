@@ -127,6 +127,16 @@ pub fn load(path: &Path) -> Result<Keys, String> {
     })
 }
 
+/// A fixed testnet Unified Address, for tests. Spec: none (fixture).
+#[cfg(test)]
+pub fn tests_address() -> String {
+    unified_address(
+        derive(&[9u8; 32], 0)
+            .unwrap()
+            .address_at(0u32, Scope::External),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
