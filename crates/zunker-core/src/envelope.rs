@@ -418,6 +418,9 @@ struct Checks {
     aead_ok: Choice,
     parse_ok: Choice,
     padding_ok: Choice,
+    /// `N` is the smallest size class that fits the content. Stricter than
+    /// the draft's drop list; see [`smallest_class_ok`].
+    class_ok: Choice,
     ek_ok: Choice,
     not_expired: Choice,
     fresh: Choice,
@@ -437,6 +440,7 @@ impl Checks {
             & self.aead_ok
             & self.parse_ok
             & self.padding_ok
+            & self.class_ok
             & self.ek_ok
             & self.not_expired
             & self.fresh;
@@ -513,6 +517,7 @@ fn check(
     let aead_ok = sym_decrypt(&key, &mut plaintext, &tag);
 
     let (fields, parse_ok, padding_ok) = parse_plaintext(&plaintext);
+    let class_ok = smallest_class_ok(n, fields.payload_end);
 
     let esk = Zeroizing::new(esk_from_seed(&fields.seed));
     let ek_ok = point_bytes(&(g_d * *esk)).ct_eq(&ek);
@@ -529,6 +534,7 @@ fn check(
         aead_ok,
         parse_ok,
         padding_ok,
+        class_ok,
         ek_ok,
         not_expired,
         fresh,
@@ -544,6 +550,29 @@ fn framed_ephemeral_key(envelope: &[u8]) -> Option<[u8; 32]> {
     let mut ek = [0u8; 32];
     ek.copy_from_slice(&envelope[1..PREFIX_LEN]);
     Some(ek)
+}
+
+/// Whether `n` is the smallest size class that fits `used` bytes of content
+/// (header, `fast_reply` and payload), i.e. `used` exceeds the next smaller
+/// class. `n` is public (it is the Envelope's length); `used` is compared in
+/// constant time.
+///
+/// Senders MUST pad "up to the smallest N that fits" (ZIP § Envelopes, L212),
+/// but the drop list (L238–243) does not drop an Envelope that pads further.
+/// We drop it anyway: a recipient that accepts oversized Envelopes lets a
+/// sender choose sizes that mark its Envelopes, which defeats fixed sizes
+/// (§ Rationale, "Why fixed sizes?"). This is stricter than the draft; we will
+/// raise it upstream.
+///
+/// Spec: ZIP § Envelopes (L198, L212, L238–243).
+fn smallest_class_ok(n: usize, used: usize) -> Choice {
+    let below = SIZE_CLASSES
+        .iter()
+        .copied()
+        .take_while(|&c| c < n)
+        .last()
+        .unwrap_or(0);
+    (used as u64).ct_gt(&(below as u64))
 }
 
 /// Field offsets and fixed fields of a plaintext. Zeroized on drop.
@@ -833,6 +862,70 @@ mod tests {
                 "pos {pos}"
             );
         }
+    }
+
+    /// Encodes `msg` padded to `n` instead of the smallest class. Spec: ZIP §
+    /// Envelopes (L200–212).
+    fn encode_padded_to(seed: &[u8; 32], msg: &Message, n: usize) -> Zeroizing<Vec<u8>> {
+        let mut pt = encode_plaintext(seed, msg).unwrap();
+        pt.resize(n, 0);
+        pt
+    }
+
+    /// Spec: ZIP § Envelopes (L212), stricter than L238–243: content that fits
+    /// a smaller class but is padded to a larger one is dropped, although it
+    /// decrypts and parses with zero padding.
+    #[test]
+    fn drop_oversized_class() {
+        let me = Wallet::new(0).owned(0);
+        let seed = [8u8; 32];
+        let cases = [
+            (0, 32768),
+            (0, 262144),
+            (2048 - HEADER_LEN, 32768),
+            (32768 - HEADER_LEN, 262144),
+        ];
+        for (len, n) in cases {
+            let mut pt = encode_padded_to(&seed, &text(len), n);
+            let env = forge_first(me.receiver(), &seed, &mut pt);
+            let checks = check_first(&me, &env, NOW, &HashSet::new()).unwrap();
+            assert!(bool::from(
+                checks.aead_ok & checks.parse_ok & checks.padding_ok & checks.ek_ok
+            ));
+            assert!(!bool::from(checks.class_ok), "payload {len} in {n}");
+            assert!(dropped(open_first(&me, &env, NOW, &mut HashSet::new())));
+        }
+    }
+
+    /// Spec: ZIP § Envelopes (L212): one byte over a class boundary is
+    /// accepted in the next class, and the rule applies in Conversations too.
+    #[test]
+    fn smallest_class_accepted_at_boundaries() {
+        assert!(bool::from(smallest_class_ok(2048, HEADER_LEN)));
+        assert!(bool::from(smallest_class_ok(2048, 2048)));
+        assert!(!bool::from(smallest_class_ok(32768, 2048)));
+        assert!(bool::from(smallest_class_ok(32768, 2049)));
+        assert!(!bool::from(smallest_class_ok(262144, 32768)));
+        assert!(bool::from(smallest_class_ok(262144, 32769)));
+
+        let me = Wallet::new(0).owned(0);
+        let mut rng = rng();
+        let (_, conv) = seal_first(me.receiver(), &text(1), &mut rng).unwrap();
+        let seed = [9u8; 32];
+        let esk = esk_from_seed(&seed);
+        let ek = point_bytes(&(conv.responder().g_d() * esk));
+        let mut pt = encode_padded_to(&seed, &text(5), 32768);
+        let env = seal_plaintext(conv.kappa(), Direction::Responder, &ek, &mut pt);
+        let mut seen = HashSet::new();
+        assert!(dropped(open(
+            &conv,
+            Direction::Responder,
+            &env,
+            NOW,
+            &mut seen
+        )));
+        let ok = seal(&conv, Direction::Responder, &text(5), &mut rng).unwrap();
+        assert!(open(&conv, Direction::Responder, &ok, NOW, &mut seen).is_ok());
     }
 
     /// Spec: ZIP § Envelopes (L241): `ephemeralKey` not derived from `seed` is

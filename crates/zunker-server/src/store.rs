@@ -61,7 +61,8 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Implementations must give each stored Envelope a nonzero `seq`, strictly
 /// greater than any `seq` ever given under that Mailbox ID, even after
-/// deletions. Times are seconds since the Unix epoch.
+/// deletions, and must keep nothing about a mailbox once it holds no
+/// Envelopes. Times are seconds since the Unix epoch.
 ///
 /// Spec: § Mailbox Servers (L314–318).
 pub trait Store: Send + Sync + 'static {
@@ -87,7 +88,8 @@ pub trait Store: Send + Sync + 'static {
     ) -> Result<Vec<FetchedEnvelope>, StoreError>;
 
     /// Deletes Envelopes with `seq <= up_to` received at or before
-    /// `received_at_or_before`. Returns how many were deleted.
+    /// `received_at_or_before`, and the mailbox's quota records if it is left
+    /// empty. Returns how many were deleted.
     /// Spec: § Mailbox Servers (L316–317).
     fn delete_acknowledged(
         &self,
@@ -96,25 +98,50 @@ pub trait Store: Send + Sync + 'static {
         received_at_or_before: u64,
     ) -> Result<u64, StoreError>;
 
-    /// Discards every Envelope received before `received_before`, and quota
-    /// records for windows that ended before it. Returns how many Envelopes
-    /// were discarded.
+    /// Discards every Envelope received before `received_before`, quota
+    /// records for windows that ended before it, and quota records of
+    /// mailboxes left empty. Returns how many Envelopes were discarded.
     /// Spec: § Mailbox Servers (L317–318).
     fn purge(&self, received_before: u64) -> Result<u64, StoreError>;
 }
 
 /// `seq` and times are stored as SQLite INTEGER (i64). Values above `i64::MAX`
-/// cannot occur for `seq` (it counts up from 1) and are clamped for cursors.
+/// cannot occur for `seq` (see [`next_seq`]) and are clamped for cursors.
 /// Spec: § Mailbox Servers (L312 `after` is a u64).
 fn to_sql_int(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
+/// Bits of `seq` below the deposit time. `unix_seconds << 20` leaves room for
+/// about a million deposits per second before the counter runs ahead of the
+/// clock, and stays below `i64::MAX` until the year 280 000.
+/// Spec: § Mailbox Servers (L314–315).
+pub const SEQ_TIME_SHIFT: u32 = 20;
+
+/// The `seq` for the next Envelope: `max(last_seq + 1, unix_seconds << 20)`.
+///
+/// One counter serves every mailbox, so `seq` is greater than any ever given
+/// under any Mailbox ID, and nothing per mailbox has to be kept to guarantee
+/// it. Because the counter never falls behind the clock, it also survives a
+/// lost database row: after a restart the clock alone keeps `seq` increasing.
+/// The cost is that `seq` tells a fetcher roughly when an Envelope was
+/// deposited, to the second.
+///
+/// Spec: § Mailbox Servers (L314–315).
+pub fn next_seq(last_seq: u64, now: u64) -> u64 {
+    let from_clock = now.saturating_mul(1 << SEQ_TIME_SHIFT);
+    last_seq
+        .saturating_add(1)
+        .max(from_clock)
+        .min(i64::MAX as u64)
+}
+
 /// SQLite-backed [`Store`].
 ///
-/// `mailboxes` keeps the last `seq` of every Mailbox ID that ever received an
-/// Envelope, so `seq`s are never reused after deletion or expiry. The cost is
-/// one 72-byte row per such Mailbox ID, kept indefinitely.
+/// `seq` comes from one persisted global counter ([`next_seq`]), so the store
+/// keeps no row for a mailbox beyond its Envelopes. Deposit-quota rows for a
+/// mailbox are removed with its last Envelope, and otherwise when their window
+/// ends.
 ///
 /// Spec: § Mailbox Servers (L314–318).
 pub struct SqliteStore {
@@ -139,10 +166,11 @@ impl SqliteStore {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA secure_delete = ON;
-             CREATE TABLE IF NOT EXISTS mailboxes (
-                 id BLOB PRIMARY KEY,
+             CREATE TABLE IF NOT EXISTS seq_counter (
+                 id INTEGER PRIMARY KEY CHECK (id = 0),
                  last_seq INTEGER NOT NULL
-             ) WITHOUT ROWID;
+             );
+             INSERT OR IGNORE INTO seq_counter (id, last_seq) VALUES (0, 0);
              CREATE TABLE IF NOT EXISTS envelopes (
                  mailbox_id BLOB NOT NULL,
                  seq INTEGER NOT NULL,
@@ -159,9 +187,32 @@ impl SqliteStore {
                  PRIMARY KEY (mailbox_id, window)
              ) WITHOUT ROWID;",
         )?;
+        Self::drop_per_mailbox_counters(&conn)?;
         Ok(SqliteStore {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Databases created before the global counter kept a `mailboxes` table
+    /// with one row per Mailbox ID ever seen. Carry its largest `seq` into the
+    /// global counter, then drop it, so no record of past mailboxes remains.
+    /// Spec: § Mailbox Servers (L314–315).
+    fn drop_per_mailbox_counters(conn: &Connection) -> Result<(), StoreError> {
+        let old: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mailboxes')",
+            [],
+            |r| r.get(0),
+        )?;
+        if old {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE seq_counter SET last_seq =
+                     MAX(last_seq, (SELECT COALESCE(MAX(last_seq), 0) FROM mailboxes));
+                 DROP TABLE mailboxes;
+                 COMMIT;",
+            )?;
+        }
+        Ok(())
     }
 
     /// Locks the connection, recovering from a poisoned lock (a panic while
@@ -173,8 +224,8 @@ impl SqliteStore {
 }
 
 impl Store for SqliteStore {
-    /// One IMMEDIATE transaction: check quota and capacity, bump `last_seq`,
-    /// insert the Envelope, count it against the quota.
+    /// One IMMEDIATE transaction: check quota and capacity, advance the global
+    /// counter, insert the Envelope, count it against the quota.
     /// Spec: § Mailbox Servers (L311, L314–315).
     fn deposit(
         &self,
@@ -212,12 +263,13 @@ impl Store for SqliteStore {
             return Ok(DepositOutcome::Full);
         }
 
-        let seq: i64 = tx.query_row(
-            "INSERT INTO mailboxes (id, last_seq) VALUES (?1, 1)
-             ON CONFLICT (id) DO UPDATE SET last_seq = last_seq + 1
-             RETURNING last_seq",
-            params![id],
-            |r| r.get(0),
+        let last: i64 = tx.query_row("SELECT last_seq FROM seq_counter WHERE id = 0", [], |r| {
+            r.get(0)
+        })?;
+        let seq = to_sql_int(next_seq(u64::try_from(last).unwrap_or(0), now));
+        tx.execute(
+            "UPDATE seq_counter SET last_seq = ?1 WHERE id = 0",
+            params![seq],
         )?;
         tx.execute(
             "INSERT INTO envelopes (mailbox_id, seq, envelope, received_at) VALUES (?1, ?2, ?3, ?4)",
@@ -269,15 +321,19 @@ impl Store for SqliteStore {
         up_to: u64,
         received_at_or_before: u64,
     ) -> Result<u64, StoreError> {
-        let conn = self.conn();
-        let n = conn.execute(
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let id = &mailbox.as_bytes()[..];
+        let n = tx.execute(
             "DELETE FROM envelopes WHERE mailbox_id = ?1 AND seq <= ?2 AND received_at <= ?3",
-            params![
-                &mailbox.as_bytes()[..],
-                to_sql_int(up_to),
-                to_sql_int(received_at_or_before)
-            ],
+            params![id, to_sql_int(up_to), to_sql_int(received_at_or_before)],
         )?;
+        tx.execute(
+            "DELETE FROM deposit_quota WHERE mailbox_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM envelopes WHERE mailbox_id = ?1)",
+            params![id],
+        )?;
+        tx.commit()?;
         Ok(n as u64)
     }
 
@@ -290,7 +346,8 @@ impl Store for SqliteStore {
             params![to_sql_int(received_before)],
         )?;
         tx.execute(
-            "DELETE FROM deposit_quota WHERE window_end < ?1",
+            "DELETE FROM deposit_quota WHERE window_end < ?1
+             OR NOT EXISTS (SELECT 1 FROM envelopes WHERE envelopes.mailbox_id = deposit_quota.mailbox_id)",
             params![to_sql_int(received_before)],
         )?;
         tx.commit()?;
@@ -309,46 +366,121 @@ mod tests {
         quota_window_secs: 3600,
     };
 
-    /// `seq` starts at 1 and increases by mailbox.
+    /// The `seq` a deposit at `now` gets on an otherwise idle server.
     /// Spec: § Mailbox Servers (L314–315).
-    #[test]
-    fn seq_per_mailbox_nonzero_increasing() {
-        let s = SqliteStore::open_in_memory().unwrap();
-        let (a, b) = (mailbox_id(1), mailbox_id(2));
-        let mut last = 0;
-        for i in 0..5 {
-            let DepositOutcome::Stored(seq) = s.deposit(&a, &envelope(i), 100, &LIMITS).unwrap()
-            else {
-                panic!()
-            };
-            assert!(seq > last && seq != 0);
-            last = seq;
-            assert_eq!(
-                s.deposit(&b, &envelope(i), 100, &LIMITS).unwrap(),
-                DepositOutcome::Stored(i as u64 + 1)
-            );
+    fn at(now: u64) -> u64 {
+        now << SEQ_TIME_SHIFT
+    }
+
+    /// Stores and returns the `seq`. Spec: § Mailbox Servers (L314–315).
+    fn put(s: &SqliteStore, m: &MailboxId, i: u8, now: u64) -> u64 {
+        match s.deposit(m, &envelope(i), now, &LIMITS).unwrap() {
+            DepositOutcome::Stored(seq) => seq,
+            other => panic!("{other:?}"),
         }
     }
 
-    /// `seq` is never reused after deletion or expiry.
-    /// Spec: § Mailbox Servers (L314–315: "greater than any it has ever given").
+    /// `max(last_seq + 1, unix_seconds << 20)`, saturating.
+    /// Spec: § Mailbox Servers (L314–315).
+    #[test]
+    fn next_seq_formula() {
+        assert_eq!(next_seq(0, 0), 1);
+        assert_eq!(next_seq(0, 100), at(100));
+        assert_eq!(next_seq(at(100), 100), at(100) + 1);
+        assert_eq!(next_seq(at(200), 100), at(200) + 1); // clock went back
+        assert_eq!(next_seq(u64::MAX, u64::MAX), i64::MAX as u64);
+    }
+
+    /// One counter for every mailbox: nonzero, strictly increasing across
+    /// mailboxes, and following the clock.
+    /// Spec: § Mailbox Servers (L314–315).
+    #[test]
+    fn seq_global_nonzero_increasing() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        let (a, b) = (mailbox_id(1), mailbox_id(2));
+        assert_eq!(put(&s, &a, 0, 100), at(100));
+        assert_eq!(put(&s, &b, 0, 100), at(100) + 1);
+        assert_eq!(put(&s, &a, 1, 100), at(100) + 2);
+        assert_eq!(put(&s, &b, 1, 101), at(101));
+        // The clock going backwards does not make `seq` go backwards.
+        assert_eq!(put(&s, &a, 2, 50), at(101) + 1);
+    }
+
+    /// `seq` is never reused after deletion or expiry, with nothing kept per
+    /// mailbox. Spec: § Mailbox Servers (L314–315: "greater than any it has ever given").
     #[test]
     fn seq_never_reused() {
         let s = SqliteStore::open_in_memory().unwrap();
         let a = mailbox_id(1);
-        for i in 0..3 {
-            s.deposit(&a, &envelope(i), 100, &LIMITS).unwrap();
-        }
-        assert_eq!(s.delete_acknowledged(&a, 3, 100).unwrap(), 3);
-        assert_eq!(
-            s.deposit(&a, &envelope(9), 100, &LIMITS).unwrap(),
-            DepositOutcome::Stored(4)
-        );
+        let last = (0..3).map(|i| put(&s, &a, i, 100)).last().unwrap();
+        assert_eq!(s.delete_acknowledged(&a, last, 100).unwrap(), 3);
+        let next = put(&s, &a, 9, 100);
+        assert!(next > last);
         assert_eq!(s.purge(u64::MAX).unwrap(), 1);
-        assert_eq!(
-            s.deposit(&a, &envelope(9), 200, &LIMITS).unwrap(),
-            DepositOutcome::Stored(5)
-        );
+        assert!(put(&s, &a, 9, 100) > next);
+    }
+
+    /// The counter is persisted: reopening a database file continues it, and a
+    /// database with the old per-mailbox `mailboxes` table is migrated and the
+    /// table dropped. Spec: § Mailbox Servers (L314–315).
+    #[test]
+    fn counter_persists_and_old_table_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("zunker-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("counter.sqlite");
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE mailboxes (id BLOB PRIMARY KEY, last_seq INTEGER NOT NULL) WITHOUT ROWID;
+                 INSERT INTO mailboxes VALUES (x'01', 5), (x'02', 9000000000000000000);",
+            )
+            .unwrap();
+        }
+        let first = {
+            let s = SqliteStore::open(&path).unwrap();
+            let tables: i64 = s
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'mailboxes'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(tables, 0);
+            put(&s, &mailbox_id(1), 0, 100)
+        };
+        assert_eq!(first, 9_000_000_000_000_000_001);
+        let s = SqliteStore::open(&path).unwrap();
+        assert_eq!(put(&s, &mailbox_id(2), 0, 100), first + 1);
+        drop(s);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Nothing about a mailbox outlives its Envelopes: once the last one is
+    /// deleted or purged, no row mentions its ID.
+    /// Spec: § Mailbox Servers (L314–318), § Privacy Implications (L112–118).
+    #[test]
+    fn nothing_outlives_envelopes() {
+        let rows_for = |s: &SqliteStore, m: &MailboxId| -> i64 {
+            let c = s.conn();
+            let id = &m.as_bytes()[..];
+            let q = |sql: &str| -> i64 { c.query_row(sql, params![id], |r| r.get(0)).unwrap() };
+            q("SELECT COUNT(*) FROM envelopes WHERE mailbox_id = ?1")
+                + q("SELECT COUNT(*) FROM deposit_quota WHERE mailbox_id = ?1")
+        };
+        let s = SqliteStore::open_in_memory().unwrap();
+        let (a, b) = (mailbox_id(1), mailbox_id(2));
+        let seq = put(&s, &a, 0, 100);
+        put(&s, &b, 0, 200);
+        assert!(rows_for(&s, &a) > 0);
+        s.delete_acknowledged(&a, seq, 100).unwrap();
+        assert_eq!(rows_for(&s, &a), 0);
+        assert!(rows_for(&s, &b) > 0);
+        // Purging b's Envelope also removes its quota row, though its quota
+        // window (3600 s from 0) has not ended at the cutoff.
+        s.purge(201).unwrap();
+        assert_eq!(rows_for(&s, &b), 0);
     }
 
     /// The cursor and the byte budget. Spec: § Mailbox Servers (L315–316).
@@ -359,10 +491,17 @@ mod tests {
         for i in 0..4 {
             s.deposit(&a, &envelope(i), 100, &LIMITS).unwrap();
         }
-        let seqs = |v: Vec<FetchedEnvelope>| v.into_iter().map(|e| e.seq).collect::<Vec<_>>();
+        let seqs = |v: Vec<FetchedEnvelope>| {
+            v.into_iter()
+                .map(|e| e.seq - at(100) + 1)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(seqs(s.fetch(&a, 0, usize::MAX).unwrap()), [1, 2, 3, 4]);
-        assert_eq!(seqs(s.fetch(&a, 2, usize::MAX).unwrap()), [3, 4]);
-        assert_eq!(seqs(s.fetch(&a, 4, usize::MAX).unwrap()), Vec::<u64>::new());
+        assert_eq!(seqs(s.fetch(&a, at(100) + 1, usize::MAX).unwrap()), [3, 4]);
+        assert_eq!(
+            seqs(s.fetch(&a, at(100) + 3, usize::MAX).unwrap()),
+            Vec::<u64>::new()
+        );
         assert_eq!(
             seqs(s.fetch(&a, u64::MAX, usize::MAX).unwrap()),
             Vec::<u64>::new()
@@ -379,8 +518,8 @@ mod tests {
     fn unknown_equals_empty() {
         let s = SqliteStore::open_in_memory().unwrap();
         let a = mailbox_id(1);
-        s.deposit(&a, &envelope(0), 100, &LIMITS).unwrap();
-        s.delete_acknowledged(&a, 1, 100).unwrap();
+        let seq = put(&s, &a, 0, 100);
+        s.delete_acknowledged(&a, seq, 100).unwrap();
         assert_eq!(
             s.fetch(&a, 0, usize::MAX).unwrap(),
             s.fetch(&mailbox_id(2), 0, usize::MAX).unwrap()
@@ -393,17 +532,18 @@ mod tests {
     fn delete_respects_age_and_cursor() {
         let s = SqliteStore::open_in_memory().unwrap();
         let a = mailbox_id(1);
-        s.deposit(&a, &envelope(0), 100, &LIMITS).unwrap();
-        s.deposit(&a, &envelope(1), 200, &LIMITS).unwrap();
-        s.deposit(&a, &envelope(2), 100, &LIMITS).unwrap();
-        assert_eq!(s.delete_acknowledged(&a, 2, 150).unwrap(), 1); // seq 1 only
+        let s1 = put(&s, &a, 0, 100);
+        let s2 = put(&s, &a, 1, 200);
+        let s3 = put(&s, &a, 2, 100);
+        assert_eq!(s.delete_acknowledged(&a, s2, 150).unwrap(), 1); // s1 only
         let left: Vec<u64> = s
             .fetch(&a, 0, usize::MAX)
             .unwrap()
             .iter()
             .map(|e| e.seq)
             .collect();
-        assert_eq!(left, [2, 3]);
+        assert_eq!(left, [s2, s3]);
+        assert!(s1 < s2 && s2 < s3);
     }
 
     /// Retention purge. Spec: § Mailbox Servers (L317–318).
@@ -411,10 +551,10 @@ mod tests {
     fn purge_by_age() {
         let s = SqliteStore::open_in_memory().unwrap();
         let a = mailbox_id(1);
-        s.deposit(&a, &envelope(0), 100, &LIMITS).unwrap();
-        s.deposit(&a, &envelope(1), 300, &LIMITS).unwrap();
+        put(&s, &a, 0, 100);
+        let kept = put(&s, &a, 1, 300);
         assert_eq!(s.purge(200).unwrap(), 1);
-        assert_eq!(s.fetch(&a, 0, usize::MAX).unwrap()[0].seq, 2);
+        assert_eq!(s.fetch(&a, 0, usize::MAX).unwrap()[0].seq, kept);
     }
 
     /// Quota per window, and the per-mailbox cap.
@@ -430,11 +570,11 @@ mod tests {
         };
         assert!(matches!(
             s.deposit(&a, &envelope(0), 0, &limits).unwrap(),
-            DepositOutcome::Stored(1)
+            DepositOutcome::Stored(_)
         ));
         assert!(matches!(
             s.deposit(&a, &envelope(1), 10, &limits).unwrap(),
-            DepositOutcome::Stored(2)
+            DepositOutcome::Stored(_)
         ));
         assert_eq!(
             s.deposit(&a, &envelope(2), 59, &limits).unwrap(),
@@ -444,12 +584,12 @@ mod tests {
         assert!(matches!(
             s.deposit(&mailbox_id(2), &envelope(2), 59, &limits)
                 .unwrap(),
-            DepositOutcome::Stored(1)
+            DepositOutcome::Stored(_)
         ));
         // Next window.
         assert!(matches!(
             s.deposit(&a, &envelope(3), 60, &limits).unwrap(),
-            DepositOutcome::Stored(3)
+            DepositOutcome::Stored(_)
         ));
         assert_eq!(
             s.deposit(&a, &envelope(4), 61, &limits).unwrap(),
