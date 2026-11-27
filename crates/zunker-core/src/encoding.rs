@@ -4,17 +4,12 @@
 //! Zcash Protocol Specification sections it references (§5.4.1.2 BLAKE2,
 //! §4.2.3 ToScalar^Orchard, §5.4.3 Sym, §5.4.9.6 repr_P, §5.4.9.8 GroupHash^P).
 
-use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
-use chacha20::ChaCha20;
-use chacha20poly1305::{AeadInOut, ChaCha20Poly1305, KeyInit, Nonce};
+use chacha20poly1305::{AeadInOut, ChaCha20Poly1305, KeyInit, Nonce, Tag};
 use ff::FromUniformBytes;
 use group::GroupEncoding;
 use pasta_curves::arithmetic::CurveExt;
 use pasta_curves::pallas;
-use poly1305::universal_hash::UniversalHash;
-use poly1305::Poly1305;
-use subtle::{Choice, ConstantTimeEq, CtOption};
-use zeroize::Zeroizing;
+use subtle::{Choice, CtOption};
 
 /// BLAKE2b personalizations used by the ZIP. Typing them as `&[u8; 16]` makes
 /// a wrong length a compile error; `personalizations_are_exact` checks the text.
@@ -132,35 +127,22 @@ pub fn sym_encrypt(key: &[u8; 32], buf: &mut [u8]) -> [u8; TAG_LEN] {
 }
 
 /// `Sym.Decrypt_K(C)`: inverse of [`sym_encrypt`]. Returns whether the tag is
-/// valid. On success `buf` holds the plaintext; on failure it holds
-/// `C xor keystream` and must not be used.
+/// valid. On success `buf` holds the plaintext; on failure it is left as the
+/// ciphertext and must not be used.
 ///
-/// Unlike `ChaCha20Poly1305::decrypt_*`, which returns before decrypting when
-/// the tag is wrong, this always computes the Poly1305 tag *and* applies the
-/// whole ChaCha20 keystream, then compares tags in constant time, so a wrong
-/// tag takes the same work as a right one. The construction is RFC 8439 §2.8
-/// with empty associated data, as in chacha20poly1305 0.11: the Poly1305 key is
-/// the first 32 bytes of keystream block 0, the message is encrypted from
-/// block 1, and the MAC covers `pad16(C) || le64(0) || le64(len(C))`.
+/// This is the chacha20poly1305 crate's standard decryption, as used by
+/// `zcash_note_encryption`. It returns before decrypting when the tag is wrong,
+/// so a bad tag is faster than a good one. That is not observable remotely: a
+/// dropped Envelope produces no response (ZIP § Envelopes, L233–246), and the
+/// caller still evaluates every other drop rule (see `SECURITY.md`).
 /// Single-use keys make the all-zero nonce safe, as for [`sym_encrypt`].
 ///
 /// Spec: ZIP § Notation (L174), § Envelopes (L236–240) → protocol spec §5.4.3.
 pub fn sym_decrypt(key: &[u8; 32], buf: &mut [u8], tag: &[u8; TAG_LEN]) -> Choice {
-    let mut cipher = ChaCha20::new(key.into(), &[0u8; 12].into());
-    let mut mac_key = Zeroizing::new([0u8; 32]);
-    cipher.apply_keystream(&mut mac_key[..]);
-    let mut mac = Poly1305::new_from_slice(&mac_key[..]).expect("Poly1305 keys are 32 bytes");
-    cipher.seek(64u64);
-
-    mac.update_padded(buf);
-    let mut lengths = poly1305::Block::default();
-    lengths[8..].copy_from_slice(&(buf.len() as u64).to_le_bytes());
-    mac.update(&[lengths]);
-    let expected = mac.finalize();
-    let tag_ok = expected[..].ct_eq(&tag[..]);
-
-    cipher.apply_keystream(buf);
-    tag_ok
+    let ok = ChaCha20Poly1305::new(key.into())
+        .decrypt_inout_detached(&Nonce::default(), &[], buf.into(), &Tag::from(*tag))
+        .is_ok();
+    Choice::from(u8::from(ok))
 }
 
 #[cfg(test)]
@@ -290,56 +272,5 @@ mod tests {
                 0xfa, 0xd1
             ]
         );
-    }
-
-    /// Protocol spec §5.4.3 / RFC 8439 §2.8: our decryption agrees with the
-    /// chacha20poly1305 crate for every size class and odd lengths, and rejects
-    /// what it rejects.
-    #[test]
-    fn sym_decrypt_matches_aead_crate() {
-        use chacha20poly1305::Tag;
-        for len in [0usize, 1, 15, 16, 17, 63, 64, 65, 2048, 32768, 262144] {
-            let key = [len as u8 ^ 0x5a; 32];
-            let plaintext: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
-            let mut ct = plaintext.clone();
-            let tag = sym_encrypt(&key, &mut ct);
-
-            let mut ours = ct.clone();
-            assert!(bool::from(sym_decrypt(&key, &mut ours, &tag)), "len {len}");
-            assert_eq!(ours, plaintext);
-
-            let mut theirs = ct.clone();
-            ChaCha20Poly1305::new((&key).into())
-                .decrypt_inout_detached(
-                    &Nonce::default(),
-                    &[],
-                    (&mut theirs[..]).into(),
-                    &Tag::from(tag),
-                )
-                .unwrap();
-            assert_eq!(ours, theirs);
-
-            if len > 0 {
-                let mut bad = ct.clone();
-                bad[len / 2] ^= 0x80;
-                assert!(!bool::from(sym_decrypt(&key, &mut bad, &tag)));
-            }
-        }
-    }
-
-    /// ZIP § Envelopes (L236–240): a wrong tag does the same work as a right
-    /// one. With only the tag altered, the check fails *and* the buffer has been
-    /// run through the keystream (it now equals the plaintext), so the keystream
-    /// was applied on the failure path.
-    #[test]
-    fn sym_decrypt_applies_keystream_on_failure() {
-        let key = [3u8; 32];
-        let plaintext = vec![0x42u8; 2048];
-        let mut ct = plaintext.clone();
-        let mut tag = sym_encrypt(&key, &mut ct);
-        tag[0] ^= 1;
-        let mut buf = ct.clone();
-        assert!(!bool::from(sym_decrypt(&key, &mut buf, &tag)));
-        assert_eq!(buf, plaintext);
     }
 }

@@ -21,8 +21,9 @@ vulnerability**).
 ### Secrets inside BLAKE2b's internal state are not wiped
 
 `zunker-core` zeroizes every secret buffer it holds. It also enables the
-`zeroize` features of `chacha20poly1305`, `chacha20` and `poly1305`, so the
-cipher and MAC state holding an Envelope key is wiped on drop.
+`zeroize` features of `chacha20poly1305` (which turns on `chacha20`'s) and
+`poly1305`, so the cipher and MAC state holding an Envelope key is wiped on
+drop.
 
 BLAKE2b comes from `blake2b_simd`, which does **not** wipe its internal state
 when dropped. Transient copies of secret hash inputs and outputs can therefore
@@ -42,10 +43,23 @@ revisit it before any mainnet use.
 was not given: field elements are `Copy`, and scalar multiplication takes its
 scalar by value.
 
-### Envelopes of unknown length are rejected early
+### Decryption returns early on a bad tag
 
-Every drop rule for a received Envelope is evaluated in full and combined
-once, so the work done does not depend on which rule failed. The exception is
-an Envelope whose length is not one of the three sizes: it is rejected before
-anything else, because there is nothing to decrypt. Its length is visible to
-anyone and chosen by the sender, so this reveals nothing.
+Every drop rule for a received Envelope (version, `ephemeralKey` check, tag,
+plaintext format, padding, expiry, replay) is evaluated and combined into a
+single result, so the code path does not depend on which rule failed. Two
+steps take less time when they fail:
+
+- **Unknown length.** An Envelope whose length is not one of the three sizes
+  is rejected before anything else, because there is nothing to decrypt. Its
+  length is visible to anyone and chosen by the sender, so this reveals
+  nothing.
+- **Bad tag.** Decryption uses the `chacha20poly1305` crate's standard
+  `decrypt_inout_detached`, as `zcash_note_encryption` does. It checks the tag
+  before decrypting and skips the keystream if the tag is wrong.
+
+Neither is observable remotely: a dropped Envelope produces no response, so a
+sender cannot time how it was handled. We chose the standard AEAD call over a
+hand-composed ChaCha20 + Poly1305 that does the same work in both cases,
+because the extra code to review is not worth a timing difference nobody
+outside the device can see.

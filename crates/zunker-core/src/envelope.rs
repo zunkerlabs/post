@@ -981,4 +981,61 @@ mod tests {
         let expected = point_bytes(&(me.receiver().g_d() * esk_from_seed(&seed)));
         assert_eq!(&env[1..PREFIX_LEN], &expected);
     }
+
+    /// Random bytes of every Envelope length, with and without a valid version
+    /// byte, never panic in [`open_first`] or [`open`] (either direction), are
+    /// always dropped, and are never recorded as seen.
+    ///
+    /// Spec: ZIP § Envelopes (L194–198 lengths, L233–246 drop rules).
+    mod random_envelopes {
+        use super::*;
+        use proptest::prelude::*;
+        use rand::RngExt;
+
+        /// An Envelope of size class `class` filled from `fill`, with byte 0
+        /// set to [`VERSION`] when `versioned`. Spec: ZIP § Envelopes (L194–198).
+        fn random_envelope(class: usize, fill: u64, versioned: bool) -> Vec<u8> {
+            let mut env = vec![0u8; PREFIX_LEN + SIZE_CLASSES[class] + TAG_LEN];
+            StdRng::seed_from_u64(fill).fill(&mut env[..]);
+            if versioned {
+                env[0] = VERSION;
+            }
+            env
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// Spec: ZIP § Envelopes (L233–246).
+            #[test]
+            fn open_first_drops_random_bytes(
+                class in 0..SIZE_CLASSES.len(),
+                fill in any::<u64>(),
+                versioned in any::<bool>(),
+            ) {
+                let me = Wallet::new(0).owned(0);
+                let env = random_envelope(class, fill, versioned);
+                let mut seen = HashSet::new();
+                prop_assert!(dropped(open_first(&me, &env, NOW, &mut seen)));
+                prop_assert!(seen.is_empty());
+            }
+
+            /// Spec: ZIP § Envelopes (L233–246).
+            #[test]
+            fn open_drops_random_bytes(
+                class in 0..SIZE_CLASSES.len(),
+                fill in any::<u64>(),
+                versioned in any::<bool>(),
+                initiator in any::<bool>(),
+            ) {
+                let me = Wallet::new(0).owned(0);
+                let (_, conv) = seal_first(me.receiver(), &text(1), &mut rng()).unwrap();
+                let from = if initiator { Direction::Initiator } else { Direction::Responder };
+                let env = random_envelope(class, fill, versioned);
+                let mut seen = HashSet::new();
+                prop_assert!(dropped(open(&conv, from, &env, NOW, &mut seen)));
+                prop_assert!(seen.is_empty());
+            }
+        }
+    }
 }
