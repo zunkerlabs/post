@@ -86,6 +86,50 @@ If neither is available, requests fail. The client never falls back to a
 direct connection (spec § Routing: a wallet MUST NOT bypass the anonymity
 network).
 
+## Messaging from the command line
+
+`zunker-cli` sends and fetches messages with a testnet Orchard account. It
+uses only keys and addresses, with no chain or lightwalletd. Everything goes
+over Tor (see above).
+
+```sh
+zunker-cli keygen        # new testnet account; prints its Unified Address
+zunker-cli address       # print it again
+
+zunker-cli send --to utest1... --request "zcash:utest1...?amount=0.5&message=lunch"
+zunker-cli send --to utest1... --text "hello"
+zunker-cli fetch         # print received messages and payment requests
+zunker-cli fetch --watch # keep fetching, each mailbox on its own random schedule
+zunker-cli reply --conversation <id> --text "thanks"
+```
+
+- **Data.** Keys, state and Tor data live in `~/.zunker-post` (override with
+  `--data-dir`). The seed in `keys.json` and each Conversation's secret in
+  `state.json` are stored unencrypted, readable only by you: **testnet only**.
+- **Payload.** `--request` must be a valid ZIP 321 URI. With both
+  `--request` and `--text`, two first messages are sent, each starting its
+  own conversation. The draft doesn't let the sender send a second message in
+  a conversation until it gets a reply.
+- **Tor.** `--tor auto|arti|system` picks how to reach Tor, and `--socks`
+  sets the system tor's SOCKS address.
+
+### Server List
+
+Until the ZIP specifies a Server List, the client reads a provisional JSON
+file, `~/.zunker-post/servers.json` by default (or `--servers`):
+
+```json
+{
+  "format": "zunker-provisional-1",
+  "servers": [
+    { "server_id": "<64 hex: the server's server_id>", "onion": "<56 base32>.onion:7878" }
+  ]
+}
+```
+
+Sender and recipient must use the same list, because each mailbox's server is
+chosen from it (spec § Mailboxes).
+
 ## Development note
 
 AI tools were used during development. The direction, design and ideas behind Zunker Post are the author's, Jatin Sahijwani, who is responsible for the code in this repository.
