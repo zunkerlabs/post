@@ -1,0 +1,30 @@
+# Example Mailbox Server config. Run with:
+#   zunker-cli serve --config crates/zunker-server/server.example.toml
+
+listen = "127.0.0.1:7878"
+
+# 32-byte server_id as 64 hex characters. Fetch signatures are bound to it.
+# Generate one with: openssl rand -hex 32
+server_id = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# SQLite file, or ":memory:".
+database = "zunker-mailbox.sqlite3"
+
+[retention]
+# Envelopes older than this are discarded, fetched or not.
+max_age_hours = 720
+# Delete Envelopes with seq <= after when a Fetch acknowledges them. Off by
+# default so several devices sharing a viewing key can each fetch everything.
+delete_on_fetch = false
+# With delete_on_fetch, keep Envelopes at least this long anyway.
+min_age_before_delete_hours = 168
+
+[limits]
+# Bytes of (seq, len, Envelope) triples per Fetch response; at least 262205.
+fetch_byte_budget = 4194304
+max_envelopes_per_mailbox = 1000
+# Deposits accepted per mailbox per window; the rest are dropped silently.
+deposit_quota = 100
+deposit_quota_window_secs = 3600
+io_timeout_secs = 30
+max_connections = 1024

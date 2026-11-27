@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/zunker-core"]
+members = ["crates/zunker-cli", "crates/zunker-core", "crates/zunker-server"]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/zunkerlabs/post"
-rust-version = "1.85"
+rust-version = "1.89"
