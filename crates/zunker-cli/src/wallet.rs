@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use zunker_client::address::{payment_request, text};
+use zunker_client::address::{payment_request, payment_request_with_message, text};
 use zunker_client::client::{hours, now_secs};
 use zunker_client::transport::{ArtiDirs, DEFAULT_SOCKS_PROXY};
 use zunker_client::{Client, MailboxRef, Received, Schedule, ServerList, StateFile, Transport};
@@ -21,6 +21,12 @@ use crate::keys;
 const TESTNET_WARNING: &str = "\
 WARNING: TESTNET ONLY. These keys are stored unencrypted on this machine.
 Never send mainnet funds to this address or reuse this seed elsewhere.";
+
+/// Printed by one-shot `fetch`. Spec: § Wallet behaviour (L374–376).
+const ONE_SHOT_WARNING: &str = "\
+Note: a one-shot fetch checks every mailbox now, so its timing follows your
+action. For privacy, use `zunker-cli fetch --watch`, which fetches each mailbox
+on its own random schedule, independent of what you do.";
 
 /// How to reach Tor. Spec: § Routing (L349–350): never directly.
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -59,19 +65,17 @@ pub struct Payload {
 }
 
 impl Payload {
-    /// The messages to send, payment request first. Spec: § Payloads (L248–258).
-    fn messages(&self, now_hours: u32) -> Result<Vec<Message>, String> {
-        let mut out = Vec::new();
-        if let Some(uri) = &self.request {
-            out.push(payment_request(uri, now_hours).map_err(|e| e.to_string())?);
+    /// The one Envelope's message: a Payment request, carrying `--text` (if
+    /// given) as its ZIP 321 `message`; or a Text if only `--text` is given.
+    /// Spec: § Payloads (L248–258).
+    fn message(&self, now_hours: u32) -> Result<Message, String> {
+        match (&self.request, &self.text) {
+            (Some(uri), None) => payment_request(uri, now_hours),
+            (Some(uri), Some(t)) => payment_request_with_message(uri, t, now_hours),
+            (None, Some(t)) => Ok(text(t, now_hours)),
+            (None, None) => return Err("give --request, --text, or both".into()),
         }
-        if let Some(t) = &self.text {
-            out.push(text(t, now_hours));
-        }
-        if out.is_empty() {
-            return Err("give --request, --text, or both".into());
-        }
-        Ok(out)
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -158,18 +162,16 @@ async fn client(dir: &Path, net: &NetArgs) -> Result<Client, String> {
     Client::new(transport, servers, StateFile::new(paths.state)).map_err(|e| e.to_string())
 }
 
-/// `send`: first Envelopes to a Unified Address, each starting its own
-/// Conversation. With both `--request` and `--text`, two are sent: the
-/// initiator MUST NOT send a second Envelope in a Conversation before a reply.
+/// `send`: one first Envelope to a Unified Address, starting a Conversation.
+/// With both `--request` and `--text`, the text rides in the request's ZIP 321
+/// `message`, so the initiator still sends only one Envelope before a reply.
 /// Spec: § Conversations (L289–290, L296–299).
 pub async fn send(dir: &Path, net: &NetArgs, to: &str, payload: &Payload) -> Result<(), String> {
     zunker_client::orchard_receiver(to).map_err(|e| e.to_string())?;
-    let messages = payload.messages(hours(now_secs()))?;
+    let m = payload.message(hours(now_secs()))?;
     let mut c = client(dir, net).await?;
-    for m in &messages {
-        let id = c.deposit(to, m).await.map_err(|e| e.to_string())?;
-        println!("sent {} (conversation {id})", kind(m.payload_type));
-    }
+    let id = c.deposit(to, &m).await.map_err(|e| e.to_string())?;
+    println!("sent {} (conversation {id})", kind(m.payload_type));
     Ok(())
 }
 
@@ -181,15 +183,13 @@ pub async fn reply(
     conversation: &str,
     payload: &Payload,
 ) -> Result<(), String> {
-    let messages = payload.messages(hours(now_secs()))?;
+    let m = payload.message(hours(now_secs()))?;
     let mut c = client(dir, net).await?;
-    for m in &messages {
-        c.reply(conversation, m).await.map_err(|e| e.to_string())?;
-        println!(
-            "sent {} in conversation {conversation}",
-            kind(m.payload_type)
-        );
-    }
+    c.reply(conversation, &m).await.map_err(|e| e.to_string())?;
+    println!(
+        "sent {} in conversation {conversation}",
+        kind(m.payload_type)
+    );
     Ok(())
 }
 
@@ -206,6 +206,7 @@ pub async fn fetch(
     let account = k.account();
     let mut c = client(dir, net).await?;
     if !watch {
+        eprintln!("{ONE_SHOT_WARNING}\n");
         let out = c.fetch(&account).await.map_err(|e| e.to_string())?;
         report(&out);
         return Ok(());
@@ -357,7 +358,8 @@ mod tests {
         assert_eq!(zec(0), "0");
     }
 
-    /// At least one payload is required; both give request then text.
+    /// At least one payload is required; with both, one Payment request
+    /// carries the text as its ZIP 321 `message`.
     /// Spec: § Payloads (L248–258).
     #[test]
     fn payload_choice() {
@@ -365,16 +367,29 @@ mod tests {
             request: None,
             text: None,
         };
-        assert!(none.messages(0).is_err());
+        assert!(none.message(0).is_err());
         let t = Payload {
             request: None,
             text: Some("hi".into()),
         };
-        assert_eq!(t.messages(0).unwrap().len(), 1);
+        assert_eq!(t.message(0).unwrap().payload_type, payload_type::TEXT);
+        let ua = crate::keys::tests_address();
+        let both = Payload {
+            request: Some(format!("zcash:{ua}?amount=0.1")),
+            text: Some("received with thanks".into()),
+        };
+        let m = both.message(0).unwrap();
+        assert_eq!(m.payload_type, payload_type::PAYMENT_REQUEST);
+        let req =
+            zip321::TransactionRequest::from_uri(std::str::from_utf8(&m.payload).unwrap()).unwrap();
+        assert_eq!(
+            req.payments()[&0].message().unwrap(),
+            "received with thanks"
+        );
         let bad = Payload {
             request: Some("https://x".into()),
             text: None,
         };
-        assert!(bad.messages(0).is_err());
+        assert!(bad.message(0).is_err());
     }
 }

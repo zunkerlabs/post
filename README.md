@@ -106,20 +106,27 @@ over Tor (see above).
 zunker-cli keygen        # new testnet account; prints its Unified Address
 zunker-cli address       # print it again
 
-zunker-cli send --to utest1... --request "zcash:utest1...?amount=0.5&message=lunch"
+zunker-cli send --to utest1... --request "zcash:utest1...?amount=0.5"
+zunker-cli send --to utest1... --request "zcash:utest1...?amount=0.5" --text "lunch"
 zunker-cli send --to utest1... --text "hello"
-zunker-cli fetch         # print received messages and payment requests
 zunker-cli fetch --watch # keep fetching, each mailbox on its own random schedule
+zunker-cli fetch         # one pass now (see the note below)
 zunker-cli reply --conversation <id> --text "thanks"
 ```
 
 - **Data.** Keys, state and Tor data live in `~/.zunker-post` (override with
   `--data-dir`). The seed in `keys.json` and each Conversation's secret in
   `state.json` are stored unencrypted, readable only by you: **testnet only**.
-- **Payload.** `--request` must be a valid ZIP 321 URI. With both
-  `--request` and `--text`, two first messages are sent, each starting its
-  own conversation. The draft doesn't let the sender send a second message in
-  a conversation until it gets a reply.
+- **Payload.** `--request` must be a valid ZIP 321 URI. With `--text` as
+  well, the text goes into the request's ZIP 321 `message` parameter
+  (percent-encoded) and one message is sent. This works only for a request
+  with a single payment and no `message` of its own. `--text` alone sends a
+  Text message.
+- **Fetch timing.** `fetch --watch` is the privacy-preserving mode: it
+  fetches each mailbox on its own random schedule, independent of what you
+  do. A one-shot `fetch` checks every mailbox right away, so its timing
+  follows your action, which a server could correlate. It prints a warning
+  saying so.
 - **Tor.** `--tor auto|arti|system` picks how to reach Tor, and `--socks`
   sets the system tor's SOCKS address.
 
