@@ -14,7 +14,6 @@ pub mod metrics;
 pub mod server;
 pub mod store;
 pub mod verify;
-pub mod wire;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::Config;

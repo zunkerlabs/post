@@ -15,6 +15,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync"] }
 toml = "1.2.3"
 zunker-core = { version = "0.1.0", path = "../zunker-core" }
+zunker-wire = { version = "0.1.0", path = "../zunker-wire" }
 
 [dev-dependencies]
 ff = "0.14"

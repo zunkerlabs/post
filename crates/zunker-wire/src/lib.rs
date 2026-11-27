@@ -1,4 +1,5 @@
-//! Request and response encoding, and length-prefixed framing.
+//! Wire format shared by Mailbox Servers and wallets: request and response
+//! encoding, and length-prefixed framing.
 //!
 //! Spec: `spec/zip-draft-1435.md` § Mailbox Servers (L309–312) for requests and
 //! responses; Appendix A, Tor (L497–498) for framing.
@@ -7,6 +8,9 @@
 //! Appendix A: one request per connection, request and response each preceded
 //! by a `u32` length. The draft marks this TBD; the length is little-endian
 //! here, following § Notation (L184). It will change if the draft does.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zunker_core::envelope::SIZE_CLASSES;
@@ -164,6 +168,24 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, body: &[u8]) -> std::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use group::{Group, GroupEncoding};
+    use pasta_curves::pallas;
+
+    /// A valid Mailbox ID distinct for each `n`. Spec: § Mailboxes (L262–264).
+    fn mailbox_id(n: u64) -> MailboxId {
+        let g = pallas::Point::generator() * pallas::Scalar::from(n + 1);
+        let mut id = [0u8; 64];
+        id[..32].copy_from_slice(&g.to_bytes());
+        id[32..].copy_from_slice(&g.double().to_bytes());
+        MailboxId::from_bytes(&id).unwrap()
+    }
+
+    /// A smallest-size-class Envelope. Spec: § Envelopes (L194–198).
+    fn envelope(tag: u8) -> Vec<u8> {
+        let mut e = vec![tag; 2048 + 49];
+        e[0] = 1;
+        e
+    }
 
     /// The three Envelope lengths and nothing else. Spec: § Envelopes (L194–198).
     #[test]
@@ -181,8 +203,8 @@ mod tests {
     /// Spec: § Mailbox Servers (L311, L326–328).
     #[test]
     fn parse_deposit() {
-        let id = crate::test_support::mailbox_id(1);
-        let env = crate::test_support::envelope(0);
+        let id = mailbox_id(1);
+        let env = envelope(0);
         let frame = encode_deposit(&id, &env);
         assert_eq!(
             parse_request(&frame),

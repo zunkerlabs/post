@@ -23,7 +23,7 @@ use arti_client::{IsolationToken, StreamPrefs, TorClient};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tor_rtcompat::PreferredRuntime;
-use zunker_server::wire::{read_frame, write_frame};
+use zunker_wire::{read_frame, write_frame};
 
 /// Default SOCKS port of a system tor. Spec: Appendix A, Tor (L496).
 pub const DEFAULT_SOCKS_PROXY: &str = "127.0.0.1:9050";

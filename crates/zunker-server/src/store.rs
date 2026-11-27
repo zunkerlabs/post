@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use zunker_core::mailbox::MailboxId;
 
-use crate::wire::{fetch_item_len, FetchedEnvelope};
+use zunker_wire::{fetch_item_len, FetchedEnvelope};
 
 /// Limits applied to a Deposit. Spec: § Open issues (L450–451), § Privacy
 /// Implications (L138–139).
