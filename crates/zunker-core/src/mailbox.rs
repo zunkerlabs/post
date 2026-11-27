@@ -48,7 +48,6 @@ impl MailboxId {
     }
 
     /// `(G, P)`, both non-identity. Spec: ZIP § Mailboxes (L262–264).
-    #[allow(dead_code)] // used by the sig module
     pub(crate) fn points(&self) -> (pallas::Point, pallas::Point) {
         split_points(&self.0).expect("a MailboxId always holds two valid points")
     }
@@ -108,19 +107,16 @@ impl MailboxKey {
     }
 
     /// The generator `G`. Spec: ZIP § Mailboxes (L262–263).
-    #[allow(dead_code)] // used by the sig module
     pub(crate) fn g(&self) -> &pallas::Point {
         &self.g
     }
 
     /// The validating key `P`. Spec: ZIP § Mailboxes (L262–263).
-    #[allow(dead_code)] // used by the sig module
     pub(crate) fn p(&self) -> &pallas::Point {
         &self.p
     }
 
     /// The fetch-authorizing scalar `a`. Spec: ZIP § Mailboxes (L263).
-    #[allow(dead_code)] // used by the sig module
     pub(crate) fn a(&self) -> &pallas::Scalar {
         &self.a
     }

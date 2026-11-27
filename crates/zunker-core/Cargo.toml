@@ -12,6 +12,7 @@ publish = false
 blake2b_simd = "1"
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
 ff = "0.14"
+getrandom = "0.4"
 group = "0.14"
 pasta_curves = { version = "0.6", features = ["alloc", "zeroize"] }
 # Not used directly: turns on poly1305's zeroize feature, which
@@ -25,3 +26,4 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 orchard = { version = "0.16", default-features = false, features = ["std"] }
 proptest = "1"
 rand = "0.10"
+reddsa = "0.6"
