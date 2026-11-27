@@ -1,0 +1,20 @@
+# torrc for a Zunker Post Mailbox Server behind a v3 onion service.
+#
+# Spec: spec/zip-draft-1435.md Appendix A, Tor (L490-501). The server address
+# is the onion service's key; the port is TBD in the draft, so 7878 is ours.
+#
+# With a system tor, append the two HiddenService lines to /etc/tor/torrc (or
+# put them in /etc/tor/torrc.d/), point HiddenServicePort at the server's
+# `listen` address, and restart tor. The onion address appears in
+# <HiddenServiceDir>/hostname. Keep that directory's keys: they are the
+# server's address.
+
+# This tor only publishes the onion service; it is not a client proxy.
+SocksPort 0
+
+HiddenServiceDir /var/lib/tor/zunker/
+HiddenServicePort 7878 127.0.0.1:7878
+
+# The server sees every connection as coming from 127.0.0.1 and never learns a
+# client address. Tor's defaults keep the onion service unannounced to
+# anyone who does not already know its address.

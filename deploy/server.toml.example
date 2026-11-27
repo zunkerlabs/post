@@ -1,0 +1,11 @@
+# Mailbox Server config for deploy/docker-compose.yml. Copy to
+# deploy/server.toml and set server_id (openssl rand -hex 32).
+# Other settings: see crates/zunker-server/server.example.toml.
+
+# The server shares tor's network namespace and is reachable only through
+# the onion service, which forwards to this address.
+listen = "127.0.0.1:7878"
+
+server_id = "0000000000000000000000000000000000000000000000000000000000000000"
+
+database = "/var/lib/zunker/mailbox.sqlite3"
