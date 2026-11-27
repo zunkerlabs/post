@@ -9,7 +9,7 @@ use ff::FromUniformBytes;
 use group::GroupEncoding;
 use pasta_curves::arithmetic::CurveExt;
 use pasta_curves::pallas;
-use subtle::CtOption;
+use subtle::{Choice, CtOption};
 
 /// BLAKE2b personalizations used by the ZIP. Typing them as `&[u8; 16]` makes
 /// a wrong length a compile error; `personalizations_are_exact` checks the text.
@@ -126,17 +126,23 @@ pub fn sym_encrypt(key: &[u8; 32], buf: &mut [u8]) -> [u8; TAG_LEN] {
     out
 }
 
-/// `Sym.Decrypt_K(C)`: inverse of [`sym_encrypt`]. On success `buf` holds the
-/// plaintext; on failure it is left as ciphertext and `false` is returned.
+/// `Sym.Decrypt_K(C)`: inverse of [`sym_encrypt`]. Returns whether the tag is
+/// valid. On success `buf` holds the plaintext; on failure it is left as the
+/// ciphertext and must not be used.
+///
+/// This is the chacha20poly1305 crate's standard decryption, as used by
+/// `zcash_note_encryption`. It returns before decrypting when the tag is wrong,
+/// so a bad tag is faster than a good one. That is not observable remotely: a
+/// dropped Envelope produces no response (ZIP § Envelopes, L233–246), and the
+/// caller still evaluates every other drop rule (see `SECURITY.md`).
 /// Single-use keys make the all-zero nonce safe, as for [`sym_encrypt`].
 ///
-/// Spec: ZIP § Notation (L174) → protocol spec §5.4.3.
-pub fn sym_decrypt(key: &[u8; 32], buf: &mut [u8], tag: &[u8; TAG_LEN]) -> bool {
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let tag = Tag::from(*tag);
-    cipher
-        .decrypt_inout_detached(&Nonce::default(), &[], buf.into(), &tag)
-        .is_ok()
+/// Spec: ZIP § Notation (L174), § Envelopes (L236–240) → protocol spec §5.4.3.
+pub fn sym_decrypt(key: &[u8; 32], buf: &mut [u8], tag: &[u8; TAG_LEN]) -> Choice {
+    let ok = ChaCha20Poly1305::new(key.into())
+        .decrypt_inout_detached(&Nonce::default(), &[], buf.into(), &Tag::from(*tag))
+        .is_ok();
+    Choice::from(u8::from(ok))
 }
 
 #[cfg(test)]
@@ -240,15 +246,15 @@ mod tests {
         assert_ne!(&buf[..], b"wallet to wallet");
 
         let mut ok = buf.clone();
-        assert!(sym_decrypt(&key, &mut ok, &tag));
+        assert!(bool::from(sym_decrypt(&key, &mut ok, &tag)));
         assert_eq!(&ok[..], b"wallet to wallet");
 
         let mut flipped = buf.clone();
         flipped[0] ^= 1;
-        assert!(!sym_decrypt(&key, &mut flipped, &tag));
+        assert!(!bool::from(sym_decrypt(&key, &mut flipped, &tag)));
 
         let mut wrong_key = buf.clone();
-        assert!(!sym_decrypt(&[8u8; 32], &mut wrong_key, &tag));
+        assert!(!bool::from(sym_decrypt(&[8u8; 32], &mut wrong_key, &tag)));
     }
 
     /// Protocol spec §5.4.3: known answer for key = 0, nonce = 0, empty plaintext.
