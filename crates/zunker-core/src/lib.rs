@@ -9,4 +9,5 @@
 
 pub mod encoding;
 pub mod envelope;
+pub mod mailbox;
 pub mod receiver;
