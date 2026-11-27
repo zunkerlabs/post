@@ -147,6 +147,53 @@ file, `~/.zunker-post/servers.json` by default (or `--servers`):
 Sender and recipient must use the same list, because each mailbox's server is
 chosen from it (spec § Mailboxes).
 
+## Demo
+
+[`scripts/demo.sh`](scripts/demo.sh) runs a full exchange between two new
+testnet wallets, Alice and Bob, over Tor against two Mailbox Servers. Each step
+prints a clear header, so it reads well on a screen recording.
+
+1. **Start two servers** behind onion services (see "Running a Mailbox
+   Server"), each with its own `server_id`.
+2. **Build `servers.json`.** On each server, run
+   [`scripts/server-info.sh`](scripts/server-info.sh) to print its entry:
+
+   ```sh
+   scripts/server-info.sh          # Docker setup, from the repository root
+   scripts/server-info.sh --config server.toml --hostname-file /var/lib/tor/zunker/hostname   # system tor
+   # { "server_id": "…", "onion": "….onion:7878" }
+   ```
+
+   Put both entries in one file:
+
+   ```json
+   { "format": "zunker-provisional-1", "servers": [ <entry 1>, <entry 2> ] }
+   ```
+
+3. **Run the demo:**
+
+   ```sh
+   scripts/demo.sh servers.json [work-dir]
+   ```
+
+The script:
+
+1. creates `alice/` and `bob/` key directories with `keygen` and prints Bob's
+   address;
+2. has Alice send Bob `zcash:<Bob's UA>?amount=0.1&message=Zunker%20Post%20demo`;
+3. has Bob fetch it and show the decoded request, then reply with the text
+   `received`;
+4. has Alice fetch and show the reply.
+
+Settings:
+
+- `ZUNKER_TOR=system` uses a local tor instead of arti.
+- `ZUNKER_PAUSE` sets the pause between steps.
+- `ZUNKER_CLI` points to a prebuilt `zunker-cli`. Otherwise the script builds
+  one.
+
+The keys are throwaway testnet keys, kept unencrypted in the work directory.
+
 ## Development note
 
 AI tools were used during development. The direction, design and ideas behind Zunker Post are the author's, Jatin Sahijwani, who is responsible for the code in this repository.
