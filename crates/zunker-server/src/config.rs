@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::wire::MAX_FETCH_ITEM_LEN;
+use zunker_wire::MAX_FETCH_ITEM_LEN;
 
 /// Server configuration.
 ///

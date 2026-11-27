@@ -1,0 +1,18 @@
+[package]
+name = "zunker-wire"
+version = "0.1.0"
+description = "Wire format for Zcash Wallet-to-Wallet Messaging (ZIP draft #1435): requests, responses, framing"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tokio = { version = "1.54.1", features = ["io-util"] }
+zunker-core = { version = "0.1.0", path = "../zunker-core" }
+
+[dev-dependencies]
+group = "0.14"
+pasta_curves = "0.6"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "rt"] }

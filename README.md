@@ -10,6 +10,7 @@ Reference implementation of Zcash Wallet-to-Wallet Messaging, following the ZIP 
 |------|------------|
 | [`spec/zip-draft-1435.md`](spec/zip-draft-1435.md) | The ZIP draft this code implements, pinned to one revision (see [`spec/README.md`](spec/README.md)) |
 | [`crates/zunker-core`](crates/zunker-core) | Envelopes, mailboxes, server selection and fetch signatures |
+| [`crates/zunker-wire`](crates/zunker-wire) | Wire format shared by server and client: request and response encoding, length-prefixed framing |
 | [`crates/zunker-server`](crates/zunker-server) | Mailbox Server: Deposit and Fetch over TCP, SQLite storage |
 | [`crates/zunker-client`](crates/zunker-client) | Wallet side: deposit, reply and fetch over Tor (arti, or a local tor over SOCKS5); provisional Server List |
 | [`deploy`](deploy) | torrc example, Dockerfiles and docker-compose for a server behind an onion service |

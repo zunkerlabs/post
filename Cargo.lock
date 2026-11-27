@@ -6478,6 +6478,7 @@ dependencies = [
  "zip321",
  "zunker-core",
  "zunker-server",
+ "zunker-wire",
 ]
 
 [[package]]
@@ -6513,5 +6514,16 @@ dependencies = [
  "serde",
  "tokio",
  "toml 1.2.3+spec-1.1.0",
+ "zunker-core",
+ "zunker-wire",
+]
+
+[[package]]
+name = "zunker-wire"
+version = "0.1.0"
+dependencies = [
+ "group 0.14.0",
+ "pasta_curves",
+ "tokio",
  "zunker-core",
 ]

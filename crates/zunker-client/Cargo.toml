@@ -24,7 +24,9 @@ tokio = { version = "1.54.1", features = ["net", "io-util", "time"] }
 tokio-socks = "0.5"
 tor-rtcompat = { version = "0.48", default-features = false, features = ["tokio", "rustls"] }
 zunker-core = { version = "0.1.0", path = "../zunker-core" }
-zunker-server = { version = "0.1.0", path = "../zunker-server" }
+zunker-wire = { version = "0.1.0", path = "../zunker-wire" }
 
 [dev-dependencies]
+# Real servers for the integration tests only; the library does not use it.
+zunker-server = { version = "0.1.0", path = "../zunker-server" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "time", "macros"] }
