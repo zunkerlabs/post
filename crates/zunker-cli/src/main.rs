@@ -1,8 +1,13 @@
-//! `zunker-cli`: command-line entry point for Zunker Post.
+//! `zunker-cli`: command-line entry point for Zunker Post: run a Mailbox
+//! Server, or send and fetch messages with a testnet account.
 //!
-//! Spec: `spec/zip-draft-1435.md` § Mailbox Servers (L307–330).
+//! Spec: `spec/zip-draft-1435.md` § Mailbox Servers (L307–330), § Conversations
+//! (L287–305), § Routing (L332–350).
 
 #![forbid(unsafe_code)]
+
+mod keys;
+mod wallet;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -25,18 +30,87 @@ const METRICS_INTERVAL: Duration = Duration::from_secs(60);
     about = "Zunker Post: Zcash wallet-to-wallet messaging"
 )]
 struct Cli {
+    /// Where keys, state and Tor data are kept. Default: ~/.zunker-post.
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run a Mailbox Server (plain TCP).
+    /// Run a Mailbox Server (plain TCP; put it behind a Tor onion service).
     Serve {
         /// Path to the server's TOML config.
         #[arg(long)]
         config: PathBuf,
     },
+    /// Generate a testnet Orchard account and print its Unified Address.
+    Keygen,
+    /// Print the account's Unified Addresses.
+    Address,
+    /// Send a payment request and/or a text to a Unified Address (over Tor).
+    Send {
+        /// Recipient testnet Unified Address with an Orchard receiver.
+        #[arg(long)]
+        to: String,
+        #[command(flatten)]
+        payload: wallet::Payload,
+        #[command(flatten)]
+        net: wallet::NetArgs,
+    },
+    /// Reply in a Conversation (over Tor).
+    Reply {
+        /// Conversation id, as printed by `fetch` or `send`.
+        #[arg(long)]
+        conversation: String,
+        #[command(flatten)]
+        payload: wallet::Payload,
+        #[command(flatten)]
+        net: wallet::NetArgs,
+    },
+    /// Fetch and print received messages and payment requests (over Tor).
+    Fetch {
+        /// Keep running, fetching each mailbox on its own random schedule.
+        #[arg(long)]
+        watch: bool,
+        /// Mean seconds between fetches of one mailbox with --watch.
+        #[arg(long, default_value_t = 900)]
+        mean_interval_secs: u64,
+        #[command(flatten)]
+        net: wallet::NetArgs,
+    },
+}
+
+/// `~/.zunker-post`, or `--data-dir`. Spec: none (storage).
+fn data_dir(arg: Option<PathBuf>) -> Result<PathBuf, String> {
+    arg.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".zunker-post")))
+        .ok_or_else(|| "set --data-dir (HOME is not set)".to_owned())
+}
+
+/// Runs a messaging command. Spec: § Conversations (L287–305).
+async fn messaging(
+    dir: Result<PathBuf, String>,
+    command: Command,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = dir?;
+    match command {
+        Command::Serve { .. } => unreachable!("handled in main"),
+        Command::Keygen => wallet::keygen(&dir)?,
+        Command::Address => wallet::address(&dir)?,
+        Command::Send { to, payload, net } => wallet::send(&dir, &net, &to, &payload).await?,
+        Command::Reply {
+            conversation,
+            payload,
+            net,
+        } => wallet::reply(&dir, &net, &conversation, &payload).await?,
+        Command::Fetch {
+            watch,
+            mean_interval_secs,
+            net,
+        } => wallet::fetch(&dir, &net, watch, Duration::from_secs(mean_interval_secs)).await?,
+    }
+    Ok(())
 }
 
 /// Parses arguments and runs the chosen command. Spec: § Mailbox Servers (L307–330).
@@ -55,6 +129,7 @@ fn main() -> ExitCode {
     };
     let result = match cli.command {
         Command::Serve { config } => runtime.block_on(serve(&config)),
+        command => runtime.block_on(messaging(data_dir(cli.data_dir), command)),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

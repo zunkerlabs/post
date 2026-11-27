@@ -6382,6 +6382,7 @@ dependencies = [
  "memuse",
  "subtle",
  "zcash_spec",
+ "zeroize",
 ]
 
 [[package]]
@@ -6442,9 +6443,19 @@ name = "zunker-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "getrandom 0.4.3",
+ "hex",
+ "orchard",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
+ "zip32",
+ "zip321",
+ "zunker-client",
+ "zunker-core",
  "zunker-server",
 ]
 
