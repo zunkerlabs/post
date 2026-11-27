@@ -65,3 +65,11 @@ sender cannot time how it was handled. We chose the standard AEAD call over a
 hand-composed ChaCha20 + Poly1305 that does the same work in both cases,
 because the extra code to review is not worth a timing difference nobody
 outside the device can see.
+
+### Client state is not encrypted at rest
+
+`zunker-client` keeps fetch cursors, processed `ephemeralKey`s and each
+Conversation's `κ` in a JSON state file. `κ` lets anyone holding it read and
+send in that Conversation. The file is written with owner-only permissions
+(0600 on Unix), but it is not encrypted. That is acceptable for testnet; a
+wallet integration should keep this state in its own encrypted storage.
