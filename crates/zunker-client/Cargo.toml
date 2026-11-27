@@ -1,0 +1,21 @@
+[package]
+name = "zunker-client"
+version = "0.1.0"
+description = "Wallet-side client for Zcash Wallet-to-Wallet Messaging (ZIP draft #1435)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+arti-client = { version = "0.48", default-features = false, features = ["tokio", "rustls", "onion-service-client", "compression"] }
+getrandom = "0.4"
+hex = "0.4.3"
+tokio = { version = "1.54.1", features = ["net", "io-util", "time"] }
+tokio-socks = "0.5"
+tor-rtcompat = { version = "0.48", default-features = false, features = ["tokio", "rustls"] }
+zunker-server = { version = "0.1.0", path = "../zunker-server" }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "time", "macros"] }
