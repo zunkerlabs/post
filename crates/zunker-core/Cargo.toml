@@ -10,12 +10,13 @@ publish = false
 
 [dependencies]
 blake2b_simd = "1"
-chacha20 = { version = "0.10", default-features = false, features = ["cipher", "zeroize"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
 ff = "0.14"
 getrandom = "0.4"
 group = "0.14"
 pasta_curves = { version = "0.6", features = ["alloc", "zeroize"] }
+# Not used directly: turns on poly1305's zeroize feature, which
+# chacha20poly1305's own zeroize feature does not, so the MAC state is wiped.
 poly1305 = { version = "0.9", features = ["zeroize"] }
 rand_core = "0.10"
 subtle = "2.6"
@@ -23,5 +24,6 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 orchard = { version = "0.16", default-features = false, features = ["std"] }
+proptest = "1"
 rand = "0.10"
 reddsa = "0.6"
